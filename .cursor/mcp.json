@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "plan-agent": {
+      "command": "uv",
+      "args": ["run", "python", "run_mcp.py"],
+      "cwd": "E:\\plan_agent",
+      "env": {
+        "PYTHONPATH": "E:\\plan_agent"
+      }
+    }
+  }
+}

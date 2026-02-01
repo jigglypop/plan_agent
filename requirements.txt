@@ -1,0 +1,27 @@
+# Core
+python-dotenv>=1.0.0
+
+# API Server
+fastapi>=0.109.0
+uvicorn>=0.27.0
+
+# AI
+openai>=1.12.0
+
+# Notion Integration
+notion-client>=2.2.0
+
+# Crawling (for future use)
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+selenium>=4.17.0
+playwright>=1.41.0
+
+# Data Processing
+pandas>=2.2.0
+
+# Scheduling
+apscheduler>=3.10.0
+
+# Database (optional)
+sqlalchemy>=2.0.0
