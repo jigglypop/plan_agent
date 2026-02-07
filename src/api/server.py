@@ -1,75 +1,53 @@
 """
 FastAPI 백엔드 서버
+API 엔드포인트: /api/* 하위
+프론트엔드: / (정적 파일 서빙)
 """
-from fastapi import FastAPI, HTTPException
+import os
+from pathlib import Path
+
+from fastapi import FastAPI, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
-import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from src.agent import Agent
-from src.crawler import DummyCrawler
-from src.stats import StatsAnalyzer
-from src.pm import PMManager
-from src.notion import NotionClient
+from src.data import get_post_by_id, filter_posts, get_post_stats, list_files
 
 app = FastAPI(
     title="Plan Agent API",
     description="AI 기반 기획위원회 PM/통계 시스템",
-    version="1.0.0"
+    version="2.0.0",
 )
 
-# CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 전역 인스턴스
-agent = None
-crawler = None
-stats = None
-pm = None
-notion = None
+# 전역 에이전트 (싱글턴)
+_agent = None
 
 
-def get_agent():
-    global agent
-    if agent is None:
-        agent = Agent()
-    return agent
-
-
-def get_data():
-    global crawler, stats, pm
-    if crawler is None:
-        crawler = DummyCrawler()
-        events = crawler.fetch_events()
-        tasks = crawler.fetch_tasks()
-        budget_items = crawler.fetch_budget_items()
-        attendees = crawler.fetch_attendees()
-        stats = StatsAnalyzer(events, tasks, budget_items, attendees)
-        pm = PMManager(events, tasks)
-    return crawler, stats, pm
-
-
-def get_notion():
-    global notion
-    if notion is None:
-        notion = NotionClient()
-    return notion
+def get_agent() -> Agent:
+    global _agent
+    if _agent is None:
+        _agent = Agent()
+    return _agent
 
 
 # ========== 모델 ==========
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: Optional[str] = "default"
 
 
 class ChatResponse(BaseModel):
@@ -77,201 +55,150 @@ class ChatResponse(BaseModel):
     status: str = "ok"
 
 
-class EventCreate(BaseModel):
-    title: str
-    date: str
-    location: Optional[str] = ""
-    budget: Optional[int] = 0
-    manager: Optional[str] = ""
-    category: Optional[str] = "기타"
+# ========== API 라우터 ==========
+
+router = APIRouter(prefix="/api")
 
 
-# ========== 엔드포인트 ==========
-
-@app.get("/")
-def root():
-    return {"message": "Plan Agent API", "version": "1.0.0"}
-
-
-@app.get("/health")
+@router.get("/health")
 def health():
     agent = get_agent()
-    status = agent.is_ready()
-    return {
-        "status": "healthy",
-        "connections": status
-    }
+    return {"status": "healthy", "connections": agent.is_ready()}
 
 
-@app.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
     """AI 에이전트와 대화"""
     agent = get_agent()
-    response = agent.chat(request.message)
+    response = agent.chat(request.message, request.session_id)
     return ChatResponse(response=response)
 
 
-@app.post("/chat/reset")
-def reset_chat():
+@router.post("/chat/reset")
+def reset_chat(session_id: str = "default"):
     """대화 초기화"""
     agent = get_agent()
-    agent.reset_conversation()
+    agent.reset(session_id)
     return {"status": "ok", "message": "대화가 초기화되었습니다."}
 
 
-@app.get("/stats")
-def get_stats():
-    """전체 통계"""
-    _, stats, _ = get_data()
-    return stats.generate_summary()
+# ========== 게시글 ==========
 
-
-@app.get("/stats/category")
-def get_category_stats():
-    """카테고리별 통계"""
-    _, stats, _ = get_data()
-    return stats.events_by_category()
-
-
-@app.get("/stats/monthly")
-def get_monthly_stats():
-    """월별 통계"""
-    _, stats, _ = get_data()
-    return stats.events_by_month()
-
-
-@app.get("/stats/manager")
-def get_manager_stats():
-    """담당자별 통계"""
-    _, stats, _ = get_data()
-    return stats.events_by_manager()
-
-
-@app.get("/events")
-def get_events():
-    """전체 행사 목록"""
-    crawler, _, _ = get_data()
-    events = crawler.fetch_events()
+@router.get("/posts")
+def api_list_posts(year: int = None, author: str = None, keyword: str = None, limit: int = 0):
+    """게시글 목록"""
+    agent = get_agent()
+    filtered = filter_posts(agent.posts, year=year, author=author, keyword=keyword, limit=limit)
     return [
         {
-            "id": e.id,
-            "title": e.title,
-            "category": e.category.value,
-            "status": e.status.value,
-            "start_date": e.start_date.isoformat(),
-            "end_date": e.end_date.isoformat(),
-            "location": e.location,
-            "is_online": e.is_online,
-            "expected_attendees": e.expected_attendees,
-            "actual_attendees": e.actual_attendees,
-            "budget": e.budget,
-            "actual_cost": e.actual_cost,
-            "manager": e.manager
+            "id": p["id"],
+            "title": p["title"],
+            "author": p.get("author", ""),
+            "date": p.get("date", ""),
+            "views": p.get("views", 0),
+            "files_count": len(p.get("files", [])),
         }
-        for e in events
+        for p in filtered
     ]
 
 
-@app.get("/events/upcoming")
-def get_upcoming_events(days: int = 30):
-    """다가오는 행사"""
-    _, _, pm = get_data()
-    events = pm.get_upcoming_events(days)
-    return [
-        {
-            "id": e.id,
-            "title": e.title,
-            "start_date": e.start_date.isoformat(),
-            "location": e.location,
-            "manager": e.manager
-        }
-        for e in events
-    ]
+@router.get("/posts/{post_id}")
+def api_get_post(post_id: str):
+    """게시글 상세"""
+    agent = get_agent()
+    post = get_post_by_id(agent.posts, post_id)
+    if not post:
+        return {"error": "not found"}
+    return post
 
 
-@app.get("/tasks")
-def get_tasks():
-    """전체 태스크"""
-    crawler, _, _ = get_data()
-    tasks = crawler.fetch_tasks()
-    return [
-        {
-            "id": t.id,
-            "event_id": t.event_id,
-            "title": t.title,
-            "status": t.status.value,
-            "assignee": t.assignee,
-            "due_date": t.due_date.isoformat(),
-            "priority": t.priority
-        }
-        for t in tasks
-    ]
+@router.get("/posts/search/{query}")
+def api_search_posts(query: str, limit: int = 5):
+    """게시글 시맨틱 검색"""
+    agent = get_agent()
+    results = agent.vector_store.search_posts(query, limit)
+    output = []
+    for r in results:
+        post = get_post_by_id(agent.posts, r["id"])
+        if post:
+            output.append({
+                "id": post["id"],
+                "title": post["title"],
+                "author": post.get("author", ""),
+                "date": post.get("date", ""),
+                "content_preview": post.get("content", "")[:300],
+                "relevance": round(1 - r.get("distance", 0), 3),
+            })
+    return output
 
 
-@app.get("/tasks/overdue")
-def get_overdue_tasks():
-    """기한 초과 태스크"""
-    _, _, pm = get_data()
-    tasks = pm.get_overdue_tasks()
-    return [
-        {
-            "id": t.id,
-            "title": t.title,
-            "assignee": t.assignee,
-            "due_date": t.due_date.isoformat()
-        }
-        for t in tasks
-    ]
+# ========== 통계 ==========
+
+@router.get("/stats")
+def api_stats():
+    """게시글 통계"""
+    agent = get_agent()
+    return get_post_stats(agent.posts)
 
 
-@app.get("/reminders")
-def get_reminders():
-    """리마인더"""
-    _, _, pm = get_data()
-    reminders = pm.generate_reminders()
-    return [
-        {
-            "event_id": r.event_id,
-            "event_title": r.event_title,
-            "days_until": r.days_until,
-            "message": r.message,
-            "priority": r.priority
-        }
-        for r in reminders
-    ]
+# ========== 파일 ==========
+
+@router.get("/files")
+def api_files(keyword: str = None, year: int = None):
+    """첨부파일 목록"""
+    agent = get_agent()
+    return list_files(agent.posts, keyword=keyword, year=year)
 
 
-@app.get("/report/weekly")
-def get_weekly_report():
-    """주간 리포트"""
-    _, _, pm = get_data()
-    return pm.generate_weekly_report()
+# ========== 대시보드 ==========
 
-
-@app.get("/dashboard")
-def get_dashboard():
+@router.get("/dashboard")
+def api_dashboard():
     """대시보드 데이터"""
-    _, _, pm = get_data()
-    return pm.get_dashboard_data()
+    agent = get_agent()
+    stats = get_post_stats(agent.posts)
+    db_stats = agent.vector_store.get_stats()
+    recent = agent.posts[:10]
+
+    return {
+        "post_stats": stats,
+        "vectordb_stats": db_stats,
+        "recent_posts": [
+            {
+                "id": p["id"],
+                "title": p["title"],
+                "author": p.get("author", ""),
+                "date": p.get("date", ""),
+            }
+            for p in recent
+        ],
+    }
 
 
 # ========== 노션 ==========
 
-@app.get("/notion/status")
+@router.get("/notion/status")
 def notion_status():
     """노션 연결 상태"""
-    notion = get_notion()
+    agent = get_agent()
     return {
-        "connected": notion.is_connected(),
+        "connected": agent.notion.is_connected(),
         "token_set": bool(os.getenv("NOTION_TOKEN")),
-        "database_id_set": bool(os.getenv("NOTION_DATABASE_ID"))
+        "database_id_set": bool(os.getenv("NOTION_DATABASE_ID")),
     }
 
 
-@app.get("/notion/databases")
-def notion_databases():
-    """노션 데이터베이스 목록"""
-    notion = get_notion()
-    if not notion.is_connected():
-        raise HTTPException(status_code=503, detail="Notion not connected")
-    return notion.list_databases()
+# 라우터 등록
+app.include_router(router)
+
+# 하위호환: /health 직접 접근
+@app.get("/health")
+def root_health():
+    return health()
+
+
+# ========== 프론트엔드 정적 파일 서빙 ==========
+FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend" / "dist"
+
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

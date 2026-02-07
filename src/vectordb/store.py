@@ -1,39 +1,52 @@
 """
 벡터 DB (ChromaDB) 래퍼
-행사 데이터를 임베딩하여 시맨틱 검색 지원
+게시글 데이터를 임베딩하여 시맨틱 검색 지원
+OpenAI text-embedding-3-small 사용
 """
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict
 from datetime import datetime
 
 import chromadb
 from chromadb.config import Settings
+from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 
 
 class VectorStore:
-    """ChromaDB 기반 벡터 스토어"""
-    
+    """ChromaDB 기반 벡터 스토어 (OpenAI 임베딩)"""
+
     def __init__(self, persist_dir: str = "./data/chroma"):
         self.persist_dir = persist_dir
         self.client = chromadb.PersistentClient(
             path=persist_dir,
             settings=Settings(anonymized_telemetry=False)
         )
-        
+
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        self._ef = OpenAIEmbeddingFunction(
+            api_key=api_key,
+            model_name="text-embedding-3-small",
+        ) if api_key else None
+
+        ef_arg = {"embedding_function": self._ef} if self._ef else {}
+
         # 컬렉션 초기화
         self.events_collection = self.client.get_or_create_collection(
-            name="events",
-            metadata={"description": "행사 데이터"}
+            name="events_oai",
+            metadata={"description": "행사 데이터"},
+            **ef_arg,
         )
-        
+
         self.tasks_collection = self.client.get_or_create_collection(
-            name="tasks",
-            metadata={"description": "태스크 데이터"}
+            name="tasks_oai",
+            metadata={"description": "태스크 데이터"},
+            **ef_arg,
         )
-        
+
         self.posts_collection = self.client.get_or_create_collection(
-            name="posts",
-            metadata={"description": "게시글 데이터 (크롤링)"}
+            name="posts_oai",
+            metadata={"description": "게시글 데이터 (크롤링 + 첨부파일)"},
+            **ef_arg,
         )
     
     # ========== 행사 ==========
@@ -155,33 +168,56 @@ class VectorStore:
             metadatas=[meta]
         )
     
-    def add_posts_batch(self, posts: List[Dict]):
-        """게시글 일괄 추가"""
+    def add_posts_batch(self, posts: List[Dict], batch_size: int = 50):
+        """게시글 일괄 추가 (첨부파일 내용 포함)"""
         if not posts:
             return
-        
+
         ids = []
         documents = []
         metadatas = []
-        
+
         for p in posts:
+            # 제목 2회 반복 (가중치) + 본문 + 파일명 + 파일 내용(제한)
+            title = p["title"]
+            content = p.get("content", "")
+            file_content = p.get("file_content", "")
+            file_names = ", ".join(f.get("name", "") for f in p.get("files", []) if f.get("name"))
+
+            parts = [title, title]
+            if content:
+                parts.append(content[:2000])
+            if file_names:
+                parts.append(f"첨부파일: {file_names}")
+            if file_content:
+                parts.append(file_content[:3000])
+            doc = "\n".join(parts)
+
+            if len(doc) > 6000:
+                doc = doc[:6000]
+
             ids.append(p["id"])
-            documents.append(f"{p['title']}\n{p.get('content', '')}")
+            documents.append(doc)
             metadatas.append({
                 "title": p["title"],
                 "author": p.get("author", ""),
                 "date": p.get("date", ""),
                 "url": p.get("url", ""),
+                "has_files": "yes" if file_content else "no",
                 "type": "post"
             })
-        
-        self.posts_collection.upsert(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas
-        )
-        
-        print(f"게시글 {len(posts)}건 저장됨")
+
+        # 배치 단위로 upsert (API rate limit 대비)
+        for i in range(0, len(ids), batch_size):
+            end = min(i + batch_size, len(ids))
+            self.posts_collection.upsert(
+                ids=ids[i:end],
+                documents=documents[i:end],
+                metadatas=metadatas[i:end],
+            )
+
+        with_files = sum(1 for p in posts if p.get("file_content"))
+        print(f"게시글 {len(posts)}건 저장됨 (파일 내용 포함: {with_files}건)")
     
     def search_posts(self, query: str, n_results: int = 5) -> List[Dict]:
         """게시글 시맨틱 검색"""
@@ -236,62 +272,50 @@ class VectorStore:
     
     def clear_all(self):
         """모든 데이터 삭제"""
-        self.client.delete_collection("events")
-        self.client.delete_collection("tasks")
-        self.client.delete_collection("posts")
-        
-        # 재생성
-        self.events_collection = self.client.get_or_create_collection(name="events")
-        self.tasks_collection = self.client.get_or_create_collection(name="tasks")
-        self.posts_collection = self.client.get_or_create_collection(name="posts")
+        for name in ["events_oai", "tasks_oai", "posts_oai"]:
+            try:
+                self.client.delete_collection(name)
+            except Exception:
+                pass
+
+        ef_arg = {"embedding_function": self._ef} if self._ef else {}
+        self.events_collection = self.client.get_or_create_collection(name="events_oai", **ef_arg)
+        self.tasks_collection = self.client.get_or_create_collection(name="tasks_oai", **ef_arg)
+        self.posts_collection = self.client.get_or_create_collection(name="posts_oai", **ef_arg)
 
 
-def init_vector_store_with_dummy():
-    """더미 데이터로 벡터 스토어 초기화"""
-    from src.crawler import DummyCrawler
-    
+def init_vector_store_from_json(json_path: str = None):
+    """crawled.json에서 벡터 스토어 초기화 (첨부파일 파싱 포함)"""
+    from src.data import load_posts
+    from src.data.parser import enrich_posts_with_files
+
     store = VectorStore()
-    crawler = DummyCrawler()
-    
-    # 행사 데이터
-    events = crawler.fetch_events()
-    store.add_events_batch([
+    posts = load_posts(json_path)
+
+    print("첨부파일 파싱 시작...")
+    posts = enrich_posts_with_files(posts)
+
+    store.add_posts_batch([
         {
-            "id": e.id,
-            "title": e.title,
-            "description": e.description,
-            "category": e.category.value,
-            "status": e.status.value,
-            "date": e.start_date.strftime("%Y-%m-%d"),
-            "location": e.location,
-            "manager": e.manager
+            "id": p["id"],
+            "title": p["title"],
+            "content": p.get("content", ""),
+            "file_content": p.get("file_content", ""),
+            "author": p.get("author", ""),
+            "date": p.get("date", ""),
+            "url": p.get("url", ""),
         }
-        for e in events
+        for p in posts
     ])
-    
-    # 태스크 데이터
-    tasks = crawler.fetch_tasks()
-    store.add_tasks_batch([
-        {
-            "id": t.id,
-            "title": t.title,
-            "description": "",
-            "status": t.status.value,
-            "assignee": t.assignee,
-            "event_id": t.event_id
-        }
-        for t in tasks
-    ])
-    
+
     print(f"벡터 스토어 초기화 완료: {store.get_stats()}")
     return store
 
 
 if __name__ == "__main__":
-    store = init_vector_store_with_dummy()
-    
-    # 테스트 검색
+    store = init_vector_store_from_json()
+
     print("\n=== 검색 테스트 ===")
-    results = store.search_events("해커톤")
+    results = store.search_posts("겨울행사 예산")
     for r in results:
         print(f"- {r['metadata'].get('title', 'N/A')} (거리: {r['distance']:.3f})")

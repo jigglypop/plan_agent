@@ -1,242 +1,140 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Bot, User, Loader2 } from "lucide-react";
+import { Send, Bot, User, Loader2, RotateCcw } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { api } from "../api";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
 }
 
-const API_URL = "http://localhost:8000";
-
 export function ChatPanel() {
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
       content:
-        '안녕하세요! 기획위원회 AI 어시스턴트입니다. 행사 통계, 일정 관리, 태스크 조회 등을 도와드립니다.\n\n예시 질문:\n- "이번 달 통계 알려줘"\n- "다가오는 행사 뭐 있어?"\n- "김철수 담당 태스크 보여줘"',
+        '기획위원회 AI 에이전트입니다.\n20년간의 게시판 데이터를 바탕으로 답변합니다.\n\n예시 질문:\n- "2024 겨울행사 예산 알려줘"\n- "글램핑 장소 견적 찾아줘"\n- "작년 회의록 보여줘"\n- "노션에 여름행사 등록해줘"',
     },
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
   useEffect(() => {
-    scrollToBottom();
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return;
-
     const userMessage = input.trim();
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
     setIsLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMessage }),
-      });
-
-      if (!response.ok) throw new Error("API error");
-
-      const data = await response.json();
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: data.response },
-      ]);
+      const data = await api.chat(userMessage);
+      setMessages((prev) => [...prev, { role: "assistant", content: data.response }]);
     } catch {
       setMessages((prev) => [
         ...prev,
-        {
-          role: "assistant",
-          content:
-            "서버 연결에 실패했습니다. 백엔드 서버가 실행 중인지 확인해주세요.\n\n실행 방법: py run_server.py",
-        },
+        { role: "assistant", content: "서버 연결에 실패했습니다. 백엔드 서버가 실행 중인지 확인하세요." },
       ]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
+  const resetChat = async () => {
+    try { await api.resetChat(); } catch { /* ignore */ }
+    setMessages([{ role: "assistant", content: "대화가 초기화되었습니다. 무엇이든 물어보세요." }]);
   };
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "600px",
-        background: "white",
-        borderRadius: "12px",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-        overflow: "hidden",
-      }}
-    >
-      <div
-        style={{
-          padding: "1rem",
-          borderBottom: "1px solid #e5e7eb",
-          display: "flex",
-          alignItems: "center",
-          gap: "0.5rem",
-        }}
-      >
-        <Bot size={20} color="#3b82f6" />
-        <span style={{ fontWeight: 600 }}>AI 어시스턴트</span>
+    <div className="glass-dark overflow-hidden flex flex-col" style={{ height: "calc(100vh - 200px)", minHeight: "500px" }}>
+      {/* Header */}
+      <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+            <Bot size={16} className="text-white" />
+          </div>
+          <span className="font-semibold text-sm text-white">AI 에이전트</span>
+        </div>
+        <button
+          onClick={resetChat}
+          className="text-slate-500 hover:text-slate-300 transition-colors p-1.5 rounded-lg hover:bg-white/5"
+          title="대화 초기화"
+        >
+          <RotateCcw size={16} />
+        </button>
       </div>
 
-      <div
-        style={{
-          flex: 1,
-          overflowY: "auto",
-          padding: "1rem",
-          display: "flex",
-          flexDirection: "column",
-          gap: "1rem",
-        }}
-      >
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
         {messages.map((msg, idx) => (
           <div
             key={idx}
-            style={{
-              display: "flex",
-              gap: "0.75rem",
-              alignItems: "flex-start",
-              flexDirection: msg.role === "user" ? "row-reverse" : "row",
-            }}
+            className={`flex gap-3 ${msg.role === "user" ? "flex-row-reverse" : ""}`}
           >
             <div
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: "50%",
-                background: msg.role === "user" ? "#3b82f6" : "#e5e7eb",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-              }}
+              className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${
+                msg.role === "user"
+                  ? "bg-blue-500"
+                  : "bg-white/10"
+              }`}
             >
               {msg.role === "user" ? (
-                <User size={16} color="white" />
+                <User size={14} className="text-white" />
               ) : (
-                <Bot size={16} color="#374151" />
+                <Bot size={14} className="text-slate-300" />
               )}
             </div>
             <div
-              style={{
-                maxWidth: "70%",
-                padding: "0.75rem 1rem",
-                borderRadius: "12px",
-                background: msg.role === "user" ? "#3b82f6" : "#f3f4f6",
-                color: msg.role === "user" ? "white" : "#374151",
-                whiteSpace: "pre-wrap",
-                fontSize: "0.9375rem",
-                lineHeight: 1.5,
-              }}
+              className={`max-w-[75%] px-4 py-3 rounded-2xl text-sm leading-relaxed ${
+                msg.role === "user"
+                  ? "bg-blue-500/90 text-white rounded-tr-sm whitespace-pre-wrap"
+                  : "bg-white/5 text-slate-200 border border-white/5 rounded-tl-sm prose prose-invert prose-sm max-w-none prose-p:my-1 prose-li:my-0.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-2 prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-th:border prose-th:border-white/10 prose-td:border prose-td:border-white/10 prose-a:text-blue-400"
+              }`}
             >
-              {msg.content}
+              {msg.role === "user" ? msg.content : (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+              )}
             </div>
           </div>
         ))}
 
         {isLoading && (
-          <div
-            style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}
-          >
-            <div
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: "50%",
-                background: "#e5e7eb",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <Loader2
-                size={16}
-                color="#374151"
-                style={{ animation: "spin 1s linear infinite" }}
-              />
+          <div className="flex gap-3">
+            <div className="w-7 h-7 rounded-full bg-white/10 flex items-center justify-center">
+              <Loader2 size={14} className="text-slate-300" style={{ animation: "spin 1s linear infinite" }} />
             </div>
-            <div
-              style={{
-                padding: "0.75rem 1rem",
-                borderRadius: "12px",
-                background: "#f3f4f6",
-                color: "#9ca3af",
-              }}
-            >
+            <div className="px-4 py-3 rounded-2xl rounded-tl-sm bg-white/5 border border-white/5 text-slate-500 text-sm">
               생각 중...
             </div>
           </div>
         )}
-
         <div ref={messagesEndRef} />
       </div>
 
-      <div
-        style={{
-          padding: "1rem",
-          borderTop: "1px solid #e5e7eb",
-          display: "flex",
-          gap: "0.5rem",
-        }}
-      >
+      {/* Input */}
+      <div className="px-5 py-4 border-t border-white/5 flex gap-3">
         <input
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
           placeholder="메시지를 입력하세요..."
           disabled={isLoading}
-          style={{
-            flex: 1,
-            padding: "0.75rem 1rem",
-            border: "1px solid #e5e7eb",
-            borderRadius: "8px",
-            fontSize: "0.9375rem",
-            outline: "none",
-          }}
+          className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
         />
         <button
           onClick={sendMessage}
           disabled={isLoading || !input.trim()}
-          style={{
-            padding: "0.75rem",
-            background: "#3b82f6",
-            border: "none",
-            borderRadius: "8px",
-            cursor: isLoading || !input.trim() ? "not-allowed" : "pointer",
-            opacity: isLoading || !input.trim() ? 0.5 : 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
+          className="px-4 py-3 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-400 hover:to-blue-500 text-white rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed"
         >
-          <Send size={18} color="white" />
+          <Send size={16} />
         </button>
       </div>
-
-      <style>{`
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
     </div>
   );
 }

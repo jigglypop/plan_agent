@@ -8,37 +8,30 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-interface ManagerData {
-  name: string;
-  count: number;
-}
-
 interface ManagerChartProps {
-  data: ManagerData[];
+  data: { name: string; count: number }[];
+  title?: string;
 }
 
-export function ManagerChart({ data }: ManagerChartProps) {
+export function ManagerChart({ data, title = "작성자별 게시글" }: ManagerChartProps) {
   return (
-    <div className="card">
-      <div className="card-header">
-        <span className="card-title">담당자별 행사 수</span>
+    <div className="glass-dark p-5">
+      <div className="mb-4">
+        <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{title}</span>
       </div>
-      <div className="chart-container">
+      <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data} layout="vertical">
-            <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-            <XAxis type="number" tick={{ fontSize: 12 }} />
-            <YAxis
-              type="category"
-              dataKey="name"
-              tick={{ fontSize: 12 }}
-              width={60}
-            />
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+            <XAxis type="number" tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
+            <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: "#94a3b8" }} width={70} axisLine={false} tickLine={false} />
             <Tooltip
               contentStyle={{
-                borderRadius: 8,
-                border: "none",
-                boxShadow: "0 4px 6px -1px rgba(0,0,0,0.1)",
+                background: "rgba(0,0,0,0.8)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 12,
+                color: "#e2e8f0",
+                fontSize: 13,
               }}
             />
             <Bar dataKey="count" fill="#22c55e" radius={[0, 4, 4, 0]} />

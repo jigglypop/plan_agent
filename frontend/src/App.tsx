@@ -1,312 +1,143 @@
-import { useState, useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
-  Calendar,
-  Users,
-  DollarSign,
-  TrendingUp,
+  FileText,
+  Files,
   BarChart3,
-  ListTodo,
   LayoutDashboard,
   MessageSquare,
+  Database,
 } from "lucide-react";
 import {
   StatCard,
-  CategoryChart,
   MonthlyChart,
-  ReminderList,
-  UpcomingEvents,
-  TaskOverview,
-  EventTable,
   ManagerChart,
+  RecentPosts,
   ChatPanel,
 } from "./components";
-import {
-  generateEvents,
-  generateTasks,
-  calculateStats,
-  getCategoryData,
-  getMonthlyData,
-  getManagerData,
-  getUpcomingEvents,
-  getReminders,
-  getOverdueTasks,
-} from "./data/dummy";
+import type { DashboardData, PostStats } from "./api";
+import { api } from "./api";
 import "./index.css";
 
-type Tab = "dashboard" | "stats" | "events" | "tasks" | "chat";
+type Tab = "dashboard" | "chat";
 
-function formatNumber(num: number): string {
-  if (num >= 100000000) {
-    return (num / 100000000).toFixed(1) + "억";
-  }
-  if (num >= 10000) {
-    return (num / 10000).toFixed(0) + "만";
-  }
-  return new Intl.NumberFormat("ko-KR").format(num);
-}
+const TABS: { id: Tab; icon: typeof LayoutDashboard; label: string }[] = [
+  { id: "dashboard", icon: LayoutDashboard, label: "대시보드" },
+  { id: "chat", icon: MessageSquare, label: "AI 에이전트" },
+];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
+  const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [stats, setStats] = useState<PostStats | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
 
-  const { events, tasks, stats, categoryData, monthlyData, managerData } =
-    useMemo(() => {
-      const events = generateEvents(50);
-      const tasks = generateTasks(events);
-      const stats = calculateStats(events, tasks);
-      const categoryData = getCategoryData(events);
-      const monthlyData = getMonthlyData(events);
-      const managerData = getManagerData(events);
-      return { events, tasks, stats, categoryData, monthlyData, managerData };
-    }, []);
+  const fetchData = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError("");
+      const [d, s] = await Promise.all([api.dashboard(), api.stats()]);
+      setDashboard(d);
+      setStats(s);
+    } catch {
+      setError("백엔드 서버에 연결할 수 없습니다.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  const upcomingEvents = useMemo(
-    () => getUpcomingEvents(events, 30),
-    [events]
-  );
-  const reminders = useMemo(() => getReminders(events), [events]);
-  const overdueTasks = useMemo(
-    () => getOverdueTasks(tasks, events),
-    [tasks, events]
-  );
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  const yearlyData = stats
+    ? Object.entries(stats.by_year).map(([year, count]) => ({ month: year, count }))
+    : [];
+
+  const authorData = stats
+    ? Object.entries(stats.by_author).slice(0, 10).map(([name, count]) => ({ name, count }))
+    : [];
 
   return (
-    <div className="app">
-      <header className="header">
-        <h1>Plan Agent</h1>
-        <p>AI 기반 기획위원회 PM/통계 시스템</p>
+    <div className="min-h-screen flex flex-col">
+      {/* Header */}
+      <header className="glass-dark border-b border-white/10 px-8 py-5">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-white tracking-tight">Plan Agent</h1>
+            <p className="text-sm text-slate-400 mt-0.5">기획위원회 AI 에이전트</p>
+          </div>
+          <div className="flex items-center gap-4">
+            {stats && (
+              <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-sm font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/20">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                {stats.total_posts}건 로드
+              </span>
+            )}
+          </div>
+        </div>
       </header>
 
-      <main className="main">
-        <div className="tabs">
-          <button
-            className={`tab ${activeTab === "dashboard" ? "active" : ""}`}
-            onClick={() => setActiveTab("dashboard")}
-          >
-            <LayoutDashboard
-              size={16}
-              style={{ marginRight: 6, verticalAlign: "middle" }}
-            />
-            대시보드
-          </button>
-          <button
-            className={`tab ${activeTab === "stats" ? "active" : ""}`}
-            onClick={() => setActiveTab("stats")}
-          >
-            <BarChart3
-              size={16}
-              style={{ marginRight: 6, verticalAlign: "middle" }}
-            />
-            통계
-          </button>
-          <button
-            className={`tab ${activeTab === "events" ? "active" : ""}`}
-            onClick={() => setActiveTab("events")}
-          >
-            <Calendar
-              size={16}
-              style={{ marginRight: 6, verticalAlign: "middle" }}
-            />
-            행사
-          </button>
-          <button
-            className={`tab ${activeTab === "tasks" ? "active" : ""}`}
-            onClick={() => setActiveTab("tasks")}
-          >
-            <ListTodo
-              size={16}
-              style={{ marginRight: 6, verticalAlign: "middle" }}
-            />
-            태스크
-          </button>
-          <button
-            className={`tab ${activeTab === "chat" ? "active" : ""}`}
-            onClick={() => setActiveTab("chat")}
-          >
-            <MessageSquare
-              size={16}
-              style={{ marginRight: 6, verticalAlign: "middle" }}
-            />
-            AI 어시스턴트
-          </button>
+      {/* Tabs */}
+      <nav className="border-b border-white/5 px-8">
+        <div className="max-w-7xl mx-auto flex gap-1 py-2">
+          {TABS.map(({ id, icon: Icon, label }) => (
+            <button
+              key={id}
+              onClick={() => setActiveTab(id)}
+              className={`flex items-center gap-2 px-5 py-3 rounded-xl text-sm font-medium whitespace-nowrap transition-all duration-200 cursor-pointer select-none ${
+                activeTab === id
+                  ? "bg-white/10 text-white border border-white/10"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
+              }`}
+            >
+              <Icon size={18} />
+              {label}
+            </button>
+          ))}
         </div>
+      </nav>
 
-        {activeTab === "dashboard" && (
-          <>
-            <div className="grid grid-4" style={{ marginBottom: "1.5rem" }}>
-              <StatCard
-                icon={<Calendar size={24} />}
-                value={stats.totalEvents}
-                label="총 행사"
-                color="blue"
-              />
-              <StatCard
-                icon={<Users size={24} />}
-                value={formatNumber(stats.totalAttendees)}
-                label="총 참석자"
-                color="green"
-              />
-              <StatCard
-                icon={<DollarSign size={24} />}
-                value={formatNumber(stats.totalBudget) + "원"}
-                label="총 예산"
-                color="yellow"
-              />
-              <StatCard
-                icon={<TrendingUp size={24} />}
-                value={stats.averageAttendanceRate + "%"}
-                label="평균 참석률"
-                color="blue"
-              />
+      {/* Main */}
+      <main className="flex-1 px-8 py-8">
+        <div className="max-w-7xl mx-auto">
+          {error && (
+            <div className="glass-dark p-5 mb-6 border-red-500/30 text-red-300 text-sm">
+              {error}
             </div>
+          )}
 
-            <div className="grid grid-3" style={{ marginBottom: "1.5rem" }}>
-              <ReminderList reminders={reminders} />
-              <UpcomingEvents events={upcomingEvents} />
-              <TaskOverview tasks={tasks} overdueTasks={overdueTasks} />
+          {loading && !error && (
+            <div className="glass-dark p-16 text-center text-slate-400 text-base">
+              로딩 중...
             </div>
+          )}
 
-            <EventTable events={events} />
-          </>
-        )}
+          {!loading && !error && activeTab === "dashboard" && stats && dashboard && (
+            <div className="space-y-8 animate-fade-in">
+              {/* Stats */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
+                <StatCard icon={<FileText size={24} />} value={stats.total_posts} label="총 게시글" color="blue" />
+                <StatCard icon={<Files size={24} />} value={stats.total_files} label="총 첨부파일" color="green" />
+                <StatCard icon={<BarChart3 size={24} />} value={stats.year_range} label="데이터 기간" color="amber" />
+                <StatCard icon={<Database size={24} />} value={dashboard.vectordb_stats.posts} label="벡터 인덱스" color="purple" />
+              </div>
 
-        {activeTab === "stats" && (
-          <>
-            <div className="grid grid-4" style={{ marginBottom: "1.5rem" }}>
-              <StatCard
-                icon={<TrendingUp size={24} />}
-                value={stats.budgetEfficiency + "%"}
-                label="예산 효율성"
-                color="green"
-              />
-              <StatCard
-                icon={<DollarSign size={24} />}
-                value={formatNumber(stats.costPerAttendee) + "원"}
-                label="1인당 비용"
-                color="yellow"
-              />
-              <StatCard
-                icon={<ListTodo size={24} />}
-                value={stats.taskCompletionRate + "%"}
-                label="태스크 완료율"
-                color="blue"
-              />
-              <StatCard
-                icon={<Users size={24} />}
-                value={stats.averageFeedbackScore.toFixed(1) + "/5"}
-                label="평균 만족도"
-                color="green"
-              />
-            </div>
-
-            <div className="grid grid-2" style={{ marginBottom: "1.5rem" }}>
-              <CategoryChart data={categoryData} />
-              <MonthlyChart data={monthlyData} />
-            </div>
-
-            <div className="grid grid-2">
-              <ManagerChart data={managerData} />
-              <div className="card">
-                <div className="card-header">
-                  <span className="card-title">주요 지표 요약</span>
-                </div>
-                <div className="list">
-                  <div className="list-item">
-                    <span>총 행사 수</span>
-                    <span style={{ fontWeight: 600 }}>{stats.totalEvents}건</span>
-                  </div>
-                  <div className="list-item">
-                    <span>완료 행사</span>
-                    <span style={{ fontWeight: 600 }}>
-                      {events.filter((e) => e.status === "완료").length}건
-                    </span>
-                  </div>
-                  <div className="list-item">
-                    <span>온라인 행사 비율</span>
-                    <span style={{ fontWeight: 600 }}>
-                      {Math.round(
-                        (events.filter((e) => e.isOnline).length /
-                          events.length) *
-                          100
-                      )}
-                      %
-                    </span>
-                  </div>
-                  <div className="list-item">
-                    <span>실제 지출</span>
-                    <span style={{ fontWeight: 600 }}>
-                      {formatNumber(stats.totalActualCost)}원
-                    </span>
-                  </div>
-                  <div className="list-item">
-                    <span>예산 절감</span>
-                    <span
-                      style={{
-                        fontWeight: 600,
-                        color:
-                          stats.totalBudget > stats.totalActualCost
-                            ? "#22c55e"
-                            : "#ef4444",
-                      }}
-                    >
-                      {formatNumber(stats.totalBudget - stats.totalActualCost)}원
-                    </span>
-                  </div>
-                </div>
+              {/* Charts + Recent */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+                <RecentPosts posts={dashboard.recent_posts} />
+                <MonthlyChart data={yearlyData} title="연도별 게시글" />
+                <ManagerChart data={authorData} title="작성자 TOP 10" />
               </div>
             </div>
-          </>
-        )}
+          )}
 
-        {activeTab === "events" && <EventTable events={events} />}
-
-        {activeTab === "tasks" && (
-          <div className="grid grid-2">
-            <TaskOverview tasks={tasks} overdueTasks={overdueTasks} />
-            <div className="card">
-              <div className="card-header">
-                <span className="card-title">담당자별 태스크</span>
-              </div>
-              <div className="list">
-                {Array.from(new Set(tasks.map((t) => t.assignee))).map(
-                  (assignee) => {
-                    const assigneeTasks = tasks.filter(
-                      (t) => t.assignee === assignee
-                    );
-                    const completed = assigneeTasks.filter(
-                      (t) => t.status === "완료"
-                    ).length;
-                    return (
-                      <div key={assignee} className="list-item">
-                        <div>
-                          <div className="list-item-title">{assignee}</div>
-                          <div className="list-item-sub">
-                            완료 {completed} / 전체 {assigneeTasks.length}
-                          </div>
-                        </div>
-                        <div style={{ width: 100 }}>
-                          <div className="progress-bar">
-                            <div
-                              className="progress-fill"
-                              style={{
-                                width: `${(completed / assigneeTasks.length) * 100}%`,
-                              }}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  }
-                )}
-              </div>
+          {activeTab === "chat" && (
+            <div className="max-w-4xl mx-auto animate-fade-in">
+              <ChatPanel />
             </div>
-          </div>
-        )}
-
-        {activeTab === "chat" && (
-          <div style={{ maxWidth: 800, margin: "0 auto" }}>
-            <ChatPanel />
-          </div>
-        )}
+          )}
+        </div>
       </main>
     </div>
   );

@@ -7,35 +7,31 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import type { MonthlyData } from "../types";
 
 interface MonthlyChartProps {
-  data: MonthlyData[];
+  data: { month: string; count: number }[];
+  title?: string;
 }
 
-export function MonthlyChart({ data }: MonthlyChartProps) {
-  const displayData = data.slice(-12);
-
+export function MonthlyChart({ data, title = "연도별 게시글" }: MonthlyChartProps) {
   return (
-    <div className="card">
-      <div className="card-header">
-        <span className="card-title">월별 행사 수</span>
+    <div className="glass-dark p-5">
+      <div className="mb-4">
+        <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{title}</span>
       </div>
-      <div className="chart-container">
+      <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={displayData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-            <XAxis
-              dataKey="month"
-              tick={{ fontSize: 12 }}
-              tickFormatter={(v) => v.slice(5)}
-            />
-            <YAxis tick={{ fontSize: 12 }} />
+          <BarChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+            <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
             <Tooltip
               contentStyle={{
-                borderRadius: 8,
-                border: "none",
-                boxShadow: "0 4px 6px -1px rgba(0,0,0,0.1)",
+                background: "rgba(0,0,0,0.8)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 12,
+                color: "#e2e8f0",
+                fontSize: 13,
               }}
             />
             <Bar dataKey="count" fill="#3b82f6" radius={[4, 4, 0, 0]} />

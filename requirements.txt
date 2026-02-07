@@ -1,5 +1,6 @@
 # Core
 python-dotenv>=1.0.0
+pydantic>=2.0.0
 
 # API Server
 fastapi>=0.109.0
@@ -8,20 +9,26 @@ uvicorn>=0.27.0
 # AI
 openai>=1.12.0
 
+# Vector DB
+chromadb>=1.4.1
+
 # Notion Integration
 notion-client>=2.2.0
 
-# Crawling (for future use)
+# Discord Bot
+discord.py>=2.3.0
+
+# Crawling
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 selenium>=4.17.0
-playwright>=1.41.0
 
-# Data Processing
-pandas>=2.2.0
+# File Parsing
+openpyxl>=3.1.0
+xlrd>=2.0.0
+PyPDF2>=3.0.0
+python-pptx>=0.6.0
+python-docx>=1.0.0
 
-# Scheduling
-apscheduler>=3.10.0
-
-# Database (optional)
-sqlalchemy>=2.0.0
+# MCP Server
+mcp>=1.26.0
