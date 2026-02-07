@@ -27,7 +27,7 @@ from src.agent.memory import Memory
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """당신은 멘사코리아 기획위원회의 AI 에이전트입니다.
+SYSTEM_PROMPT = """당신은 멘사코리아 기획위원회의 AI 에이전트 '염시코기 2세'입니다.
 
 기획위원회는 멘사코리아의 계절 행사(신년회/봄/여름/가을/겨울)를 기획하고 운영하는 위원회입니다.
 2005년부터 현재까지 약 20년간의 게시판 데이터(회의록, 예산안, 행사 기획, 결산, 장소 견적 등)에 접근할 수 있습니다.
@@ -38,6 +38,11 @@ SYSTEM_PROMPT = """당신은 멘사코리아 기획위원회의 AI 에이전트�
 3. 예산/결산 관련 자료 검색 및 분석
 4. 행사 기획 시 참고 자료 제공 (과거 유사 행사 기반)
 5. 노션에 행사/체크리스트 생성
+
+노션 경로:
+- 공개용(public): 외부에 공개되는 정보 (행사 안내, 공지 등). target="public"으로 지정.
+- 운영진용(admin): 내부 운영 자료 (예산, 회의록, 기획 메모 등). target="admin"으로 지정.
+- 사용자가 "공개"/"외부"/"공지"라고 하면 public, "운영진"/"내부"/"회의"라고 하면 admin으로 판단.
 6. 위원회 운영 관련 정보 제공
 
 도구 사용 규칙:
@@ -148,22 +153,35 @@ class Agent:
         if not self.client:
             return self._fallback(user_message)
 
+        # 노션 대상 프리픽스 파싱
+        notion_target = "admin"
+        clean_message = user_message
+        if user_message.startswith("[notion_target="):
+            end = user_message.index("]")
+            notion_target = user_message[len("[notion_target="):end].strip()
+            clean_message = user_message[end + 1:].strip()
+
         messages = self._get_session(session_id)
-        messages.append({"role": "user", "content": user_message})
+        messages.append({"role": "user", "content": clean_message})
         self._trim_messages(messages)
-        self.memory.save(session_id, "user", user_message)
+        self.memory.save(session_id, "user", clean_message)
 
         try:
-            return self._react_loop(messages, session_id)
+            return self._react_loop(messages, session_id, notion_target=notion_target)
         except Exception as e:
             return f"오류가 발생했습니다: {e}"
 
-    def _react_loop(self, messages: list, session_id: str) -> str:
+    def _react_loop(self, messages: list, session_id: str, notion_target: str = "admin") -> str:
         """ReAct 루프: 도구 호출 -> 결과 확인 -> 반복 or 최종 응답"""
+        system_prompt = SYSTEM_PROMPT
+        if notion_target:
+            label = "공개용(public)" if notion_target == "public" else "운영진용(admin)"
+            system_prompt += f"\n\n현재 사용자가 선택한 노션 대상: {label}. 노션 관련 도구 호출 시 target=\"{notion_target}\"을 사용하세요."
+
         for _ in range(MAX_TOOL_STEPS):
             response = self.client.chat.completions.create(
                 model="gpt-5.2",
-                messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+                messages=[{"role": "system", "content": system_prompt}] + messages,
                 tools=TOOLS,
                 tool_choice="auto",
             )

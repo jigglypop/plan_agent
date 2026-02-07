@@ -4,13 +4,16 @@ API 엔드포인트: /api/* 하위
 프론트엔드: / (정적 파일 서빙)
 """
 import os
+import logging
+import tempfile
+import shutil
 from pathlib import Path
 
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -49,9 +52,21 @@ def get_agent() -> Agent:
 
 # ========== 모델 ==========
 
+logger = logging.getLogger(__name__)
+
+UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
+ALLOWED_DOC_EXT = {".pdf", ".docx", ".xlsx", ".xls", ".pptx", ".txt", ".csv"}
+ALLOWED_IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = "default"
+    file_context: Optional[str] = None
+
 
 class ResetChatRequest(BaseModel):
     session_id: Optional[str] = "default"
@@ -89,11 +104,48 @@ def vectordb_status():
     return agent.vectordb_status()
 
 
+@router.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """파일 업로드 + 텍스트 추출"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="파일명이 없습니다.")
+
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_DOC_EXT | ALLOWED_IMG_EXT:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 형식: {ext}")
+
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=400, detail="파일 크기 제한 10MB 초과")
+
+    save_path = UPLOAD_DIR / file.filename
+    save_path.write_bytes(content)
+
+    extracted = ""
+    is_image = ext in ALLOWED_IMG_EXT
+    if not is_image:
+        try:
+            from src.data.parser import parse_file
+            extracted = parse_file(str(save_path)) or ""
+        except Exception as e:
+            logger.warning("업로드 파일 파싱 실패 %s: %s", file.filename, e)
+
+    return {
+        "filename": file.filename,
+        "size": len(content),
+        "type": "image" if is_image else "document",
+        "extracted_text": extracted[:5000],
+    }
+
+
 @router.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
     """AI 에이전트와 대화"""
     agent = get_agent()
-    response = agent.chat(request.message, request.session_id)
+    message = request.message
+    if request.file_context:
+        message = f"[업로드된 파일 내용]\n{request.file_context}\n\n[질문]\n{message}"
+    response = agent.chat(message, request.session_id)
     return ChatResponse(response=response)
 
 

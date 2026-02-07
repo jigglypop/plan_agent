@@ -99,9 +99,20 @@ export const api = {
     return get<FileInfo[]>(`/files${qs ? `?${qs}` : ""}`);
   },
 
-  chat: (message: string, session_id = "web") =>
-    post<ChatResponse>("/chat", { message, session_id }),
+  chat: (message: string, session_id = "web", file_context?: string) =>
+    post<ChatResponse>("/chat", { message, session_id, file_context: file_context || null }),
 
   resetChat: (session_id = "web") =>
     post<{ status: string }>("/chat/reset", { session_id }),
+
+  upload: async (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch(`${BASE}/upload`, { method: "POST", body: form });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: "업로드 실패" }));
+      throw new Error(err.detail || `API ${res.status}`);
+    }
+    return res.json() as Promise<{ filename: string; size: number; type: string; extracted_text: string }>;
+  },
 };

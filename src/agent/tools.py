@@ -88,7 +88,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "create_notion_event",
-            "description": "노션 데이터베이스에 새 행사를 생성합니다. 행사명, 날짜, 장소, 예산, 카테고리, 담당자를 지정할 수 있습니다.",
+            "description": "노션 데이터베이스에 새 행사를 생성합니다. target으로 공개용/운영진용 경로를 선택합니다.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -98,9 +98,40 @@ TOOLS = [
                     "budget": {"type": "integer", "description": "예산 (원)"},
                     "category": {"type": "string", "description": "카테고리 (신년회/봄/여름/가을/겨울/기타)"},
                     "manager": {"type": "string", "description": "담당자"},
-                    "description": {"type": "string", "description": "행사 설명"}
+                    "description": {"type": "string", "description": "행사 설명"},
+                    "target": {"type": "string", "enum": ["public", "admin"], "description": "공개용(public) 또는 운영진용(admin). 기본값 admin"}
                 },
                 "required": ["title", "date"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_notion_page",
+            "description": "노션에 자유 형식 페이지를 생성합니다. 회의록, 공지, 메모 등을 공개용/운영진용으로 나눠 작성합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "페이지 제목"},
+                    "content": {"type": "string", "description": "페이지 본문 내용"},
+                    "target": {"type": "string", "enum": ["public", "admin"], "description": "공개용(public) 또는 운영진용(admin). 기본값 admin"}
+                },
+                "required": ["title", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_notion",
+            "description": "노션 페이지의 하위 콘텐츠를 조회합니다. 공개용/운영진용 페이지에 어떤 내용이 있는지 확인합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "enum": ["public", "admin"], "description": "공개용(public) 또는 운영진용(admin). 기본값 admin"}
+                },
+                "required": []
             }
         }
     },
@@ -182,10 +213,19 @@ class ToolExecutor:
 
     # === 쓰기 도구 ===
 
+    def _resolve_notion_target(self, target: str) -> tuple:
+        """target에 따라 (page_id, label) 반환"""
+        if target == "public":
+            page_id = os.getenv("NOTION_PUBLIC_PAGE_ID", "")
+            return page_id, "공개용"
+        page_id = os.getenv("NOTION_ADMIN_PAGE_ID", "")
+        return page_id, "운영진용"
+
     def _tool_create_notion_event(self, title: str, date: str,
                                   location: str = "", budget: int = 0,
                                   category: str = "기타", manager: str = "",
-                                  description: str = "") -> Dict:
+                                  description: str = "",
+                                  target: str = "admin") -> Dict:
         if not self.notion.is_connected():
             return {"error": "노션이 연결되지 않았습니다. NOTION_TOKEN을 확인하세요."}
 
@@ -199,7 +239,6 @@ class ToolExecutor:
             "상태": self.notion.make_select("기획중"),
         }
 
-        # 날짜 파싱
         try:
             dt = datetime.strptime(date, "%Y-%m-%d")
             properties["날짜"] = self.notion.make_date(dt)
@@ -213,7 +252,6 @@ class ToolExecutor:
         if manager:
             properties["담당자"] = self.notion.make_rich_text(manager)
 
-        # 본문 블록
         content_blocks = []
         if description:
             content_blocks.append(self.notion.make_paragraph(description))
@@ -222,10 +260,68 @@ class ToolExecutor:
         if not result:
             return {"error": "노션 페이지 생성에 실패했습니다."}
 
+        # 대상 페이지에 링크 블록 추가
+        page_id, label = self._resolve_notion_target(target)
+        if page_id:
+            link_text = f"[{label}] {title} ({date})"
+            self.notion.append_block(page_id, [self.notion.make_paragraph(link_text)])
+
         return {
             "status": "created",
+            "target": label,
             "page_id": result.get("id", ""),
             "url": result.get("url", ""),
             "title": title,
             "date": date,
         }
+
+    def _tool_create_notion_page(self, title: str, content: str,
+                                 target: str = "admin") -> Dict:
+        if not self.notion.is_connected():
+            return {"error": "노션이 연결되지 않았습니다."}
+
+        page_id, label = self._resolve_notion_target(target)
+        if not page_id:
+            return {"error": f"{label} 페이지 ID가 설정되지 않았습니다."}
+
+        # 본문을 2000자 단위로 분할 (Notion API 블록 제한)
+        blocks = []
+        for i in range(0, len(content), 2000):
+            blocks.append(self.notion.make_paragraph(content[i:i + 2000]))
+
+        try:
+            result = self.notion.client.pages.create(
+                parent={"page_id": page_id},
+                properties={"title": [{"text": {"content": title}}]},
+                children=blocks,
+            )
+            return {
+                "status": "created",
+                "target": label,
+                "title": title,
+                "page_id": result.get("id", ""),
+                "url": result.get("url", ""),
+            }
+        except Exception as e:
+            return {"error": f"노션 하위 페이지 생성 실패: {e}"}
+
+    def _tool_query_notion(self, target: str = "admin") -> Dict:
+        if not self.notion.is_connected():
+            return {"error": "노션이 연결되지 않았습니다."}
+
+        page_id, label = self._resolve_notion_target(target)
+        if not page_id:
+            return {"error": f"{label} 페이지 ID가 설정되지 않았습니다."}
+
+        try:
+            response = self.notion.client.blocks.children.list(block_id=page_id, page_size=50)
+            items = []
+            for block in response.get("results", []):
+                btype = block.get("type", "")
+                rich = block.get(btype, {}).get("rich_text", [])
+                text = "".join(r.get("plain_text", "") for r in rich)
+                if text.strip():
+                    items.append({"type": btype, "text": text.strip()})
+            return {"target": label, "page_id": page_id, "items": items}
+        except Exception as e:
+            return {"error": f"노션 조회 실패: {e}"}
