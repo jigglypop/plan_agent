@@ -21,12 +21,12 @@ import "./index.css";
 type Tab = "dashboard" | "chat";
 
 const TABS: { id: Tab; icon: typeof LayoutDashboard; label: string }[] = [
-  { id: "dashboard", icon: LayoutDashboard, label: "대시보드" },
   { id: "chat", icon: MessageSquare, label: "AI 에이전트" },
+  { id: "dashboard", icon: LayoutDashboard, label: "대시보드" },
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<Tab>("dashboard");
+  const [activeTab, setActiveTab] = useState<Tab>("chat");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [stats, setStats] = useState<PostStats | null>(null);
   const [error, setError] = useState("");
@@ -61,15 +61,15 @@ export default function App() {
   return (
     <div className="min-h-screen flex flex-col">
       {/* Header */}
-      <header className="glass-dark border-b border-white/10 px-8 py-5">
+      <header className="glass-dark border-b border-white/10 px-4 sm:px-8 py-4 sm:py-5">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-white tracking-tight">Plan Agent</h1>
-            <p className="text-sm text-slate-400 mt-0.5">기획위원회 AI 에이전트</p>
+            <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">Plan Agent</h1>
+            <p className="text-xs sm:text-sm text-slate-400 mt-0.5">기획위원회 AI 에이전트</p>
           </div>
           <div className="flex items-center gap-4">
             {stats && (
-              <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-sm font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/20">
+              <span className="hidden sm:inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-sm font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/20">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                 {stats.total_posts}건 로드
               </span>
@@ -79,13 +79,13 @@ export default function App() {
       </header>
 
       {/* Tabs */}
-      <nav className="border-b border-white/5 px-8">
+      <nav className="border-b border-white/5 px-4 sm:px-8">
         <div className="max-w-7xl mx-auto flex gap-1 py-2">
           {TABS.map(({ id, icon: Icon, label }) => (
             <button
               key={id}
               onClick={() => setActiveTab(id)}
-              className={`flex items-center gap-2 px-5 py-3 rounded-xl text-sm font-medium whitespace-nowrap transition-all duration-200 cursor-pointer select-none ${
+              className={`flex items-center gap-2 px-4 sm:px-5 py-2.5 sm:py-3 rounded-xl text-sm font-medium whitespace-nowrap transition-all duration-200 cursor-pointer select-none ${
                 activeTab === id
                   ? "bg-white/10 text-white border border-white/10"
                   : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
@@ -99,7 +99,7 @@ export default function App() {
       </nav>
 
       {/* Main */}
-      <main className="flex-1 px-8 py-8">
+      <main className="flex-1 px-3 sm:px-8 py-4 sm:py-8">
         <div className="max-w-7xl mx-auto">
           {error && (
             <div className="glass-dark p-5 mb-6 border-red-500/30 text-red-300 text-sm">
