@@ -6,7 +6,7 @@ API 엔드포인트: /api/* 하위
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -33,13 +33,17 @@ app.add_middleware(
 )
 
 # 전역 에이전트 (싱글턴)
+import threading
 _agent = None
+_agent_lock = threading.Lock()
 
 
 def get_agent() -> Agent:
     global _agent
     if _agent is None:
-        _agent = Agent()
+        with _agent_lock:
+            if _agent is None:
+                _agent = Agent()
     return _agent
 
 
@@ -47,6 +51,9 @@ def get_agent() -> Agent:
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: Optional[str] = "default"
+
+class ResetChatRequest(BaseModel):
     session_id: Optional[str] = "default"
 
 
@@ -62,8 +69,24 @@ router = APIRouter(prefix="/api")
 
 @router.get("/health")
 def health():
+    try:
+        agent = get_agent()
+        connections = agent.is_ready()
+    except Exception as e:
+        # health는 절대 500으로 죽지 않게 함
+        return {"status": "error", "error": str(e)}
+
+    status = "healthy"
+    vdb = connections.get("vectordb")
+    if isinstance(vdb, dict) and vdb.get("status") in ("error", "repaired"):
+        status = "degraded"
+    return {"status": status, "connections": connections}
+
+@router.get("/vectordb/status")
+def vectordb_status():
+    """벡터DB 색인 상태/진행률"""
     agent = get_agent()
-    return {"status": "healthy", "connections": agent.is_ready()}
+    return agent.vectordb_status()
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -75,10 +98,10 @@ def chat(request: ChatRequest):
 
 
 @router.post("/chat/reset")
-def reset_chat(session_id: str = "default"):
+def reset_chat(request: ResetChatRequest):
     """대화 초기화"""
     agent = get_agent()
-    agent.reset(session_id)
+    agent.reset(request.session_id or "default")
     return {"status": "ok", "message": "대화가 초기화되었습니다."}
 
 
@@ -108,7 +131,7 @@ def api_get_post(post_id: str):
     agent = get_agent()
     post = get_post_by_id(agent.posts, post_id)
     if not post:
-        return {"error": "not found"}
+        raise HTTPException(status_code=404, detail="not found")
     return post
 
 

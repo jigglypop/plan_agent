@@ -4,6 +4,7 @@ Discord 봇
 """
 import os
 import asyncio
+import logging
 from datetime import datetime
 from typing import Optional
 
@@ -13,6 +14,9 @@ from discord.ext import tasks
 
 from src.agent import Agent
 from src.data import get_post_stats, load_posts
+
+
+logger = logging.getLogger(__name__)
 
 
 intents = Intents.default()
@@ -35,11 +39,11 @@ async def on_ready():
     global agent
     agent = Agent()
     status = agent.is_ready()
-    print(f"Discord 봇 시작: {client.user}")
-    print(f"  OpenAI: {'연결' if status['openai'] else '미연결'}")
-    print(f"  Notion: {'연결' if status['notion'] else '미연결'}")
-    print(f"  게시글: {status['posts_count']}건 로드")
-    print(f"  VectorDB: {status['vectordb']}")
+    logger.info("Discord 봇 시작: %s", client.user)
+    logger.info("  OpenAI: %s", "연결" if status.get("openai") else "미연결")
+    logger.info("  Notion: %s", "연결" if status.get("notion") else "미연결")
+    logger.info("  게시글: %s건 로드", status.get("posts_count"))
+    logger.info("  VectorDB: %s", status.get("vectordb"))
 
     # 정기 작업 시작
     if not weekly_report.is_running():
@@ -166,10 +170,12 @@ def _split_message(text: str, limit: int) -> list:
 
 def run_bot():
     """Discord 봇 실행"""
+    from src import configure_logging
+    configure_logging()
+
     token = os.getenv("DISCORD_TOKEN")
     if not token:
-        print("DISCORD_TOKEN 환경변수가 설정되지 않았습니다.")
-        print("  https://discord.com/developers/applications")
+        logger.error("DISCORD_TOKEN 환경변수가 설정되지 않았습니다.")
         return
     client.run(token)
 

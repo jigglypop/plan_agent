@@ -2,6 +2,7 @@
 노션 API 클라이언트
 """
 import os
+import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -11,6 +12,9 @@ try:
 except ImportError:
     NOTION_AVAILABLE = False
     Client = None
+
+
+logger = logging.getLogger(__name__)
 
 
 class NotionClient:
@@ -43,7 +47,7 @@ class NotionClient:
                 for db in response.get("results", [])
             ]
         except Exception as e:
-            print(f"Error listing databases: {e}")
+            logger.exception("Error listing databases: %s", e)
             return []
     
     def get_database(self, database_id: str) -> Optional[Dict]:
@@ -54,7 +58,7 @@ class NotionClient:
         try:
             return self.client.databases.retrieve(database_id=database_id)
         except Exception as e:
-            print(f"Error getting database: {e}")
+            logger.exception("Error getting database: %s", e)
             return None
     
     def query_database(self, database_id: str, filter_obj: Dict = None, sorts: List = None) -> List[Dict]:
@@ -72,7 +76,7 @@ class NotionClient:
             response = self.client.databases.query(**params)
             return response.get("results", [])
         except Exception as e:
-            print(f"Error querying database: {e}")
+            logger.exception("Error querying database: %s", e)
             return []
     
     def create_page(self, database_id: str, properties: Dict, content: List[Dict] = None) -> Optional[Dict]:
@@ -90,7 +94,7 @@ class NotionClient:
             
             return self.client.pages.create(**params)
         except Exception as e:
-            print(f"Error creating page: {e}")
+            logger.exception("Error creating page: %s", e)
             return None
     
     def update_page(self, page_id: str, properties: Dict) -> Optional[Dict]:
@@ -101,7 +105,7 @@ class NotionClient:
         try:
             return self.client.pages.update(page_id=page_id, properties=properties)
         except Exception as e:
-            print(f"Error updating page: {e}")
+            logger.exception("Error updating page: %s", e)
             return None
     
     def get_page(self, page_id: str) -> Optional[Dict]:
@@ -112,7 +116,7 @@ class NotionClient:
         try:
             return self.client.pages.retrieve(page_id=page_id)
         except Exception as e:
-            print(f"Error getting page: {e}")
+            logger.exception("Error getting page: %s", e)
             return None
     
     def append_block(self, block_id: str, children: List[Dict]) -> Optional[Dict]:
@@ -123,7 +127,7 @@ class NotionClient:
         try:
             return self.client.blocks.children.append(block_id=block_id, children=children)
         except Exception as e:
-            print(f"Error appending block: {e}")
+            logger.exception("Error appending block: %s", e)
             return None
     
     # ========== 헬퍼 메서드 ==========

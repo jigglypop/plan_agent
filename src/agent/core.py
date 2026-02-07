@@ -4,6 +4,9 @@ ReAct 패턴: 도구 호출 -> 결과 확인 -> 추가 도구 호출 or 최종 �
 """
 import os
 import json
+import logging
+import threading
+import time
 from typing import Dict, Any
 
 try:
@@ -19,6 +22,9 @@ from src.vectordb import VectorStore
 from src.notion import NotionClient
 from src.agent.tools import TOOLS, ToolExecutor
 from src.agent.memory import Memory
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """당신은 멘사코리아 기획위원회의 AI 에이전트입니다.
@@ -65,18 +71,77 @@ class Agent:
 
         # 런타임 세션 (도구 호출 포함 전체 메시지)
         self._sessions: Dict[str, list] = {}
+        self._session_last_access: Dict[str, float] = {}
+        self._vdb_reindex_lock = threading.Lock()
+        self._vdb_reindexing = False
 
     def is_ready(self) -> Dict[str, Any]:
+        vdb = self.vector_store.get_stats()
+        if isinstance(vdb, dict) and vdb.get("status") == "repaired" and self._auto_reindex_enabled():
+            self._start_vectordb_reindex(reason="auto_repair")
+        expected_posts = sum(1 for p in self.posts if p.get("id") is not None)
         return {
             "openai": self.client is not None,
             "notion": self.notion.is_connected(),
             "data_loaded": len(self.posts) > 0,
             "posts_count": len(self.posts),
-            "vectordb": self.vector_store.get_stats(),
+            "vectordb": vdb,
+            "vectordb_index": self.vector_store.get_index_status(expected_posts=expected_posts),
+            "vectordb_reindexing": self._vdb_reindexing,
         }
+
+    def vectordb_status(self) -> Dict[str, Any]:
+        expected_posts = sum(1 for p in self.posts if p.get("id") is not None)
+        status = self.vector_store.get_index_status(expected_posts=expected_posts)
+        status["reindexing"] = self._vdb_reindexing
+        return status
+
+    @staticmethod
+    def _auto_reindex_enabled() -> bool:
+        return os.getenv("VDB_AUTO_REINDEX", "1").strip() not in ("0", "false", "False", "")
+
+    def _start_vectordb_reindex(self, reason: str = ""):
+        with self._vdb_reindex_lock:
+            if self._vdb_reindexing:
+                return
+            self._vdb_reindexing = True
+
+        t = threading.Thread(target=self._run_vectordb_reindex, args=(reason,), daemon=True)
+        t.start()
+
+    def _run_vectordb_reindex(self, reason: str):
+        try:
+            if getattr(self.vector_store, "_ef", None) is None:
+                logger.warning("VectorDB reindex skipped (no embedding) reason=%s", reason)
+                return
+
+            payload = [
+                {
+                    "id": str(p.get("id", "")),
+                    "title": p.get("title", ""),
+                    "content": p.get("content", ""),
+                    "file_content": p.get("file_content", ""),
+                    "files": p.get("files", []),
+                    "author": p.get("author", ""),
+                    "date": p.get("date", ""),
+                    "url": p.get("url", ""),
+                }
+                for p in self.posts
+                if p.get("id") is not None
+            ]
+
+            logger.warning("VectorDB reindex started (reason=%s, posts=%d)", reason, len(payload))
+            self.vector_store.add_posts_batch(payload)
+            logger.warning("VectorDB reindex completed: %s", self.vector_store.get_stats())
+        except Exception as e:
+            logger.exception("VectorDB reindex failed (reason=%s): %s", reason, e)
+        finally:
+            with self._vdb_reindex_lock:
+                self._vdb_reindexing = False
 
     def reset(self, session_id: str = "default"):
         self._sessions.pop(session_id, None)
+        self._session_last_access.pop(session_id, None)
         self.memory.clear(session_id)
 
     def chat(self, user_message: str, session_id: str = "default") -> str:
@@ -85,6 +150,7 @@ class Agent:
 
         messages = self._get_session(session_id)
         messages.append({"role": "user", "content": user_message})
+        self._trim_messages(messages)
         self.memory.save(session_id, "user", user_message)
 
         try:
@@ -107,19 +173,45 @@ class Agent:
             if not msg.tool_calls:
                 content = msg.content or ""
                 messages.append({"role": "assistant", "content": content})
+                self._trim_messages(messages)
                 self.memory.save(session_id, "assistant", content)
                 return content
 
             # 도구 호출 실행
             messages.append(msg)
             for tc in msg.tool_calls:
-                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                result = self.executor.run(tc.function.name, args)
+                raw_args = tc.function.arguments or ""
+                try:
+                    args = json.loads(raw_args) if raw_args else {}
+                except json.JSONDecodeError as e:
+                    result = {
+                        "error": "invalid_tool_arguments",
+                        "tool": tc.function.name,
+                        "exception": str(e),
+                        "raw": raw_args[:2000],
+                    }
+                    messages.append({
+                        "tool_call_id": tc.id,
+                        "role": "tool",
+                        "content": json.dumps(result, ensure_ascii=False, default=str),
+                    })
+                    self._trim_messages(messages)
+                    continue
+
+                try:
+                    result = self.executor.run(tc.function.name, args)
+                except Exception as e:
+                    result = {
+                        "error": "tool_execution_failed",
+                        "tool": tc.function.name,
+                        "exception": str(e),
+                    }
                 messages.append({
                     "tool_call_id": tc.id,
                     "role": "tool",
                     "content": json.dumps(result, ensure_ascii=False, default=str),
                 })
+                self._trim_messages(messages)
 
         # MAX_TOOL_STEPS 소진 시 강제 최종 응답
         response = self.client.chat.completions.create(
@@ -128,15 +220,45 @@ class Agent:
         )
         content = response.choices[0].message.content or ""
         messages.append({"role": "assistant", "content": content})
+        self._trim_messages(messages)
         self.memory.save(session_id, "assistant", content)
         return content
 
     def _get_session(self, session_id: str) -> list:
         """세션 메시지 가져오기 (없으면 영속 기억에서 복원)"""
+        self._evict_sessions()
         if session_id not in self._sessions:
             history = self.memory.load(session_id, limit=10)
             self._sessions[session_id] = history
+        self._session_last_access[session_id] = time.time()
         return self._sessions[session_id]
+
+    @staticmethod
+    def _session_ttl_seconds() -> int:
+        return int(os.getenv("SESSION_TTL_SECONDS", "3600"))
+
+    @staticmethod
+    def _session_max_messages() -> int:
+        return int(os.getenv("SESSION_MAX_MESSAGES", "80"))
+
+    def _evict_sessions(self):
+        ttl = self._session_ttl_seconds()
+        if ttl <= 0:
+            return
+
+        now = time.time()
+        stale = [sid for sid, ts in self._session_last_access.items() if (now - ts) > ttl]
+        for sid in stale:
+            self._sessions.pop(sid, None)
+            self._session_last_access.pop(sid, None)
+
+    def _trim_messages(self, messages: list):
+        max_len = self._session_max_messages()
+        if max_len <= 0:
+            return
+        if len(messages) <= max_len:
+            return
+        del messages[:-max_len]
 
     def _fallback(self, message: str) -> str:
         """GPT 없이 기본 응답"""
