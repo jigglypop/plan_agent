@@ -8,6 +8,8 @@ import {
   Database,
   Menu,
   X,
+  PanelRightOpen,
+  PanelRightClose,
 } from "lucide-react";
 import {
   StatCard,
@@ -15,6 +17,7 @@ import {
   ManagerChart,
   RecentPosts,
   ChatPanel,
+  NotionPanel,
 } from "./components";
 import type { DashboardData, PostStats } from "./api";
 import { api } from "./api";
@@ -30,10 +33,16 @@ const NAV: { id: Tab; icon: typeof LayoutDashboard; label: string }[] = [
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("chat");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [notionPanelOpen, setNotionPanelOpen] = useState(false);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [stats, setStats] = useState<PostStats | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+
+  // Notion target state
+  const [notionPageId, setNotionPageId] = useState("");
+  const [notionPageTitle, setNotionPageTitle] = useState("");
+  const [notionTarget, setNotionTarget] = useState<"admin" | "public">("admin");
 
   const fetchData = useCallback(async () => {
     try {
@@ -56,6 +65,12 @@ export default function App() {
   const switchTab = (tab: Tab) => {
     setActiveTab(tab);
     setSidebarOpen(false);
+  };
+
+  const handleNotionSelect = (pageId: string, title: string, target: "public" | "admin") => {
+    setNotionPageId(pageId);
+    setNotionPageTitle(title);
+    setNotionTarget(target);
   };
 
   const yearlyData = stats
@@ -82,7 +97,6 @@ export default function App() {
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        {/* Logo */}
         <div className="px-5 py-5 border-b border-white/5">
           <div className="flex items-center justify-between">
             <div>
@@ -98,7 +112,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Nav */}
         <nav className="flex-1 px-3 py-4 space-y-1">
           {NAV.map(({ id, icon: Icon, label }) => (
             <button
@@ -116,7 +129,6 @@ export default function App() {
           ))}
         </nav>
 
-        {/* Status */}
         <div className="px-5 py-4 border-t border-white/5">
           {stats ? (
             <div className="flex items-center gap-2 text-xs text-slate-500">
@@ -139,48 +151,92 @@ export default function App() {
           >
             <Menu size={20} />
           </button>
-          <span className="text-sm font-semibold text-white">
+          <span className="flex-1 text-sm font-semibold text-white">
             {NAV.find((n) => n.id === activeTab)?.label}
           </span>
+          {activeTab === "chat" && (
+            <button
+              onClick={() => setNotionPanelOpen(!notionPanelOpen)}
+              className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-white/5"
+            >
+              {notionPanelOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
+            </button>
+          )}
         </div>
 
-        {/* Content */}
-        {activeTab === "chat" && <ChatPanel />}
+        {/* Content with optional right panel */}
+        <div className="flex-1 flex min-h-0">
+          {/* Chat / Dashboard */}
+          <div className="flex-1 flex flex-col min-w-0">
+            {activeTab === "chat" && (
+              <ChatPanel
+                notionTarget={notionTarget}
+                notionPageId={notionPageId}
+                notionPageTitle={notionPageTitle}
+              />
+            )}
 
-        {activeTab === "dashboard" && (
-          <main className="flex-1 overflow-y-auto px-4 sm:px-8 py-6 sm:py-8">
-            <div className="max-w-7xl mx-auto">
-              {error && (
-                <div className="glass-dark p-5 mb-6 border-red-500/30 text-red-300 text-sm">
-                  {error}
+            {activeTab === "dashboard" && (
+              <main className="flex-1 overflow-y-auto px-4 sm:px-8 py-6 sm:py-8">
+                <div className="max-w-7xl mx-auto">
+                  {error && (
+                    <div className="glass-dark p-5 mb-6 border-red-500/30 text-red-300 text-sm">
+                      {error}
+                    </div>
+                  )}
+                  {loading && !error && (
+                    <div className="glass-dark p-16 text-center text-slate-400 text-base">
+                      로딩 중...
+                    </div>
+                  )}
+                  {!loading && !error && stats && dashboard && (
+                    <div className="space-y-8 animate-fade-in">
+                      <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
+                        <StatCard icon={<FileText size={24} />} value={stats.total_posts} label="총 게시글" color="blue" />
+                        <StatCard icon={<Files size={24} />} value={stats.total_files} label="총 첨부파일" color="green" />
+                        <StatCard icon={<BarChart3 size={24} />} value={stats.year_range} label="데이터 기간" color="amber" />
+                        <StatCard icon={<Database size={24} />} value={dashboard.vectordb_stats.posts} label="벡터 인덱스" color="purple" />
+                      </div>
+                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+                        <RecentPosts posts={dashboard.recent_posts} />
+                        <MonthlyChart data={yearlyData} title="연도별 게시글" />
+                        <ManagerChart data={authorData} title="작성자 TOP 10" />
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
+              </main>
+            )}
+          </div>
 
-              {loading && !error && (
-                <div className="glass-dark p-16 text-center text-slate-400 text-base">
-                  로딩 중...
-                </div>
-              )}
-
-              {!loading && !error && stats && dashboard && (
-                <div className="space-y-8 animate-fade-in">
-                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
-                    <StatCard icon={<FileText size={24} />} value={stats.total_posts} label="총 게시글" color="blue" />
-                    <StatCard icon={<Files size={24} />} value={stats.total_files} label="총 첨부파일" color="green" />
-                    <StatCard icon={<BarChart3 size={24} />} value={stats.year_range} label="데이터 기간" color="amber" />
-                    <StatCard icon={<Database size={24} />} value={dashboard.vectordb_stats.posts} label="벡터 인덱스" color="purple" />
-                  </div>
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-                    <RecentPosts posts={dashboard.recent_posts} />
-                    <MonthlyChart data={yearlyData} title="연도별 게시글" />
-                    <ManagerChart data={authorData} title="작성자 TOP 10" />
-                  </div>
-                </div>
-              )}
-            </div>
-          </main>
-        )}
+          {/* Right panel - Notion tree (desktop: always visible in chat, mobile: toggle) */}
+          {activeTab === "chat" && (
+            <aside
+              className={`border-l border-white/10 bg-black/40 backdrop-blur-xl flex flex-col shrink-0 transition-all duration-200 ${
+                notionPanelOpen
+                  ? "w-64 fixed inset-y-0 right-0 z-50 lg:static lg:z-auto"
+                  : "w-64 hidden xl:flex"
+              }`}
+            >
+              <NotionPanel
+                selectedPageId={notionPageId}
+                onSelectPage={handleNotionSelect}
+              />
+            </aside>
+          )}
+        </div>
       </div>
+
+      {/* Notion panel toggle (desktop, when hidden) */}
+      {activeTab === "chat" && (
+        <button
+          onClick={() => setNotionPanelOpen(!notionPanelOpen)}
+          className="hidden lg:flex xl:hidden fixed right-4 bottom-4 z-30 p-2.5 bg-white/10 backdrop-blur-xl border border-white/10 rounded-xl text-slate-400 hover:text-white transition-colors"
+          title="Notion 패널"
+        >
+          {notionPanelOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
+        </button>
+      )}
     </div>
   );
 }

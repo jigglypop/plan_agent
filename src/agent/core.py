@@ -155,11 +155,16 @@ class Agent:
 
         # 노션 대상 프리픽스 파싱
         notion_target = "admin"
+        notion_page_id = ""
         clean_message = user_message
         if user_message.startswith("[notion_target="):
             end = user_message.index("]")
             notion_target = user_message[len("[notion_target="):end].strip()
             clean_message = user_message[end + 1:].strip()
+        if clean_message.startswith("[notion_page_id="):
+            end = clean_message.index("]")
+            notion_page_id = clean_message[len("[notion_page_id="):end].strip()
+            clean_message = clean_message[end + 1:].strip()
 
         messages = self._get_session(session_id)
         messages.append({"role": "user", "content": clean_message})
@@ -167,16 +172,18 @@ class Agent:
         self.memory.save(session_id, "user", clean_message)
 
         try:
-            return self._react_loop(messages, session_id, notion_target=notion_target)
+            return self._react_loop(messages, session_id, notion_target=notion_target, notion_page_id=notion_page_id)
         except Exception as e:
             return f"오류가 발생했습니다: {e}"
 
-    def _react_loop(self, messages: list, session_id: str, notion_target: str = "admin") -> str:
+    def _react_loop(self, messages: list, session_id: str, notion_target: str = "admin", notion_page_id: str = "") -> str:
         """ReAct 루프: 도구 호출 -> 결과 확인 -> 반복 or 최종 응답"""
         system_prompt = SYSTEM_PROMPT
         if notion_target:
             label = "공개용(public)" if notion_target == "public" else "운영진용(admin)"
             system_prompt += f"\n\n현재 사용자가 선택한 노션 대상: {label}. 노션 관련 도구 호출 시 target=\"{notion_target}\"을 사용하세요."
+        if notion_page_id:
+            system_prompt += f"\n사용자가 특정 노션 페이지를 선택했습니다. 노션 페이지 생성 시 parent_page_id=\"{notion_page_id}\"를 사용하세요."
 
         for _ in range(MAX_TOOL_STEPS):
             response = self.client.chat.completions.create(

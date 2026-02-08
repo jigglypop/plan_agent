@@ -109,13 +109,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "create_notion_page",
-            "description": "노션에 자유 형식 페이지를 생성합니다. 회의록, 공지, 메모 등을 공개용/운영진용으로 나눠 작성합니다.",
+            "description": "노션에 자유 형식 페이지를 생성합니다. 회의록, 공지, 메모 등을 공개용/운영진용으로 나눠 작성합니다. parent_page_id가 있으면 해당 페이지 하위에 생성합니다.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "페이지 제목"},
                     "content": {"type": "string", "description": "페이지 본문 내용"},
-                    "target": {"type": "string", "enum": ["public", "admin"], "description": "공개용(public) 또는 운영진용(admin). 기본값 admin"}
+                    "target": {"type": "string", "enum": ["public", "admin"], "description": "공개용(public) 또는 운영진용(admin). 기본값 admin"},
+                    "parent_page_id": {"type": "string", "description": "부모 페이지 ID. 지정하면 해당 페이지 하위에 생성"}
                 },
                 "required": ["title", "content"]
             }
@@ -276,11 +277,16 @@ class ToolExecutor:
         }
 
     def _tool_create_notion_page(self, title: str, content: str,
-                                 target: str = "admin") -> Dict:
+                                 target: str = "admin",
+                                 parent_page_id: str = "") -> Dict:
         if not self.notion.is_connected():
             return {"error": "노션이 연결되지 않았습니다."}
 
-        page_id, label = self._resolve_notion_target(target)
+        if parent_page_id:
+            page_id = parent_page_id
+            label = "지정 위치"
+        else:
+            page_id, label = self._resolve_notion_target(target)
         if not page_id:
             return {"error": f"{label} 페이지 ID가 설정되지 않았습니다."}
 

@@ -19,7 +19,13 @@ interface AttachedFile {
   error?: string;
 }
 
-export function ChatPanel() {
+interface ChatPanelProps {
+  notionTarget: "admin" | "public";
+  notionPageId: string;
+  notionPageTitle: string;
+}
+
+export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
@@ -31,7 +37,6 @@ export function ChatPanel() {
   const [isLoading, setIsLoading] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
-  const [notionTarget, setNotionTarget] = useState<"admin" | "public">("admin");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -128,7 +133,11 @@ export function ChatPanel() {
     setIsLoading(true);
 
     try {
-      const prefix = `[notion_target=${notionTarget}] `;
+      let prefix = `[notion_target=${notionTarget}]`;
+      if (notionPageId) {
+        prefix += `[notion_page_id=${notionPageId}]`;
+      }
+      prefix += " ";
       const fullMessage = prefix + (userMessage || "첨부한 파일을 분석해주세요.");
       const data = await api.chat(fullMessage, "web", fileContext || undefined);
       setMessages((prev) => [...prev, { role: "assistant", content: data.response }]);
@@ -161,6 +170,12 @@ export function ChatPanel() {
     URL.revokeObjectURL(url);
   };
 
+  const targetLabel = notionPageId
+    ? notionPageTitle
+    : notionTarget === "admin" ? "운영진" : "공개";
+
+  const targetColor = notionTarget === "admin" ? "blue" : "green";
+
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Messages */}
@@ -168,7 +183,6 @@ export function ChatPanel() {
         <div className="max-w-[48rem] mx-auto px-4 sm:px-6 py-6 space-y-6">
           {messages.map((msg, idx) => (
             <div key={idx} className="group">
-              {/* Role label */}
               <div className="flex items-center gap-2 mb-2">
                 <div className={`w-7 h-7 rounded-full flex items-center justify-center ${
                   msg.role === "user" ? "bg-blue-500" : "bg-white/10"
@@ -187,7 +201,6 @@ export function ChatPanel() {
                 </button>
               </div>
 
-              {/* Content */}
               <div className="pl-9">
                 {msg.role === "user" ? (
                   <div className="text-[15px] text-slate-100 whitespace-pre-wrap leading-relaxed">{msg.content}</div>
@@ -198,7 +211,6 @@ export function ChatPanel() {
                 )}
               </div>
 
-              {/* Divider */}
               {idx < messages.length - 1 && <div className="mt-6 border-b border-white/5" />}
             </div>
           ))}
@@ -253,7 +265,6 @@ export function ChatPanel() {
       {/* Input area */}
       <div className="border-t border-white/5 bg-black/20">
         <div className="max-w-[48rem] mx-auto px-4 sm:px-6 py-3">
-          {/* Textarea */}
           <div className="relative bg-white/5 border border-white/10 rounded-2xl focus-within:ring-2 focus-within:ring-blue-500/40 focus-within:border-transparent transition-all">
             <textarea
               ref={textareaRef}
@@ -272,7 +283,6 @@ export function ChatPanel() {
               style={{ maxHeight: "200px" }}
             />
 
-            {/* Bottom toolbar inside textarea */}
             <div className="absolute bottom-0 left-0 right-0 px-3 pb-2 flex items-center justify-between">
               <div className="flex items-center gap-1">
                 <input
@@ -308,27 +318,19 @@ export function ChatPanel() {
 
                 <div className="h-4 w-px bg-white/10 mx-1" />
 
-                <div className="flex rounded-md overflow-hidden border border-white/10">
-                  <button
-                    onClick={() => setNotionTarget("admin")}
-                    className={`px-2 py-0.5 text-[10px] transition-colors ${
-                      notionTarget === "admin"
-                        ? "bg-blue-500/80 text-white"
-                        : "bg-white/5 text-slate-500 hover:text-slate-300"
-                    }`}
-                  >
-                    운영진
-                  </button>
-                  <button
-                    onClick={() => setNotionTarget("public")}
-                    className={`px-2 py-0.5 text-[10px] transition-colors ${
-                      notionTarget === "public"
-                        ? "bg-green-500/80 text-white"
-                        : "bg-white/5 text-slate-500 hover:text-slate-300"
-                    }`}
-                  >
-                    공개
-                  </button>
+                {/* Notion target indicator */}
+                <div
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-medium border ${
+                    targetColor === "blue"
+                      ? "border-blue-500/30 bg-blue-500/10 text-blue-300"
+                      : "border-green-500/30 bg-green-500/10 text-green-300"
+                  }`}
+                  title="Notion 패널에서 대상 선택"
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${
+                    targetColor === "blue" ? "bg-blue-400" : "bg-green-400"
+                  }`} />
+                  <span className="max-w-[100px] truncate">{targetLabel}</span>
                 </div>
               </div>
 
@@ -343,7 +345,7 @@ export function ChatPanel() {
           </div>
 
           <p className="text-center text-[10px] text-slate-600 mt-2">
-            Shift+Enter로 줄바꿈 / 첨부파일: PDF, DOCX, XLSX, 이미지
+            Shift+Enter로 줄바꿈 / 첨부파일: PDF, DOCX, XLSX, 이미지 / 우측 Notion 패널에서 대상 폴더 선택
           </p>
         </div>
       </div>

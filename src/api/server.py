@@ -263,6 +263,61 @@ def notion_status():
     }
 
 
+def _fetch_notion_children(client, page_id: str, depth: int = 0, max_depth: int = 3) -> list:
+    """노션 페이지 하위 구조를 재귀적으로 조회"""
+    if depth >= max_depth:
+        return []
+    try:
+        resp = client.blocks.children.list(block_id=page_id, page_size=100)
+    except Exception:
+        return []
+
+    nodes = []
+    for block in resp.get("results", []):
+        if block.get("type") == "child_page":
+            title = block["child_page"].get("title", "Untitled")
+            child_id = block["id"]
+            children = _fetch_notion_children(client, child_id, depth + 1, max_depth)
+            nodes.append({"id": child_id, "title": title, "children": children})
+        elif block.get("type") == "child_database":
+            title = block["child_database"].get("title", "Untitled DB")
+            nodes.append({"id": block["id"], "title": f"[DB] {title}", "children": []})
+    return nodes
+
+
+@router.get("/notion/tree")
+def notion_tree():
+    """노션 공개용/운영진용 페이지 트리 구조"""
+    agent = get_agent()
+    if not agent.notion.is_connected():
+        raise HTTPException(status_code=503, detail="노션 미연결")
+
+    result = {}
+    for key, label in [("NOTION_PUBLIC_PAGE_ID", "public"), ("NOTION_ADMIN_PAGE_ID", "admin")]:
+        page_id = os.getenv(key, "")
+        if not page_id:
+            result[label] = {"id": "", "title": label, "children": []}
+            continue
+
+        children = _fetch_notion_children(agent.notion.client, page_id)
+        # 루트 페이지 제목 가져오기
+        try:
+            page = agent.notion.client.pages.retrieve(page_id=page_id)
+            title = ""
+            for prop in page.get("properties", {}).values():
+                if prop.get("type") == "title":
+                    title = "".join(t.get("plain_text", "") for t in prop.get("title", []))
+                    break
+            if not title:
+                title = label
+        except Exception:
+            title = label
+
+        result[label] = {"id": page_id, "title": title, "children": children}
+
+    return result
+
+
 # 라우터 등록
 app.include_router(router)
 

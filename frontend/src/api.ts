@@ -69,6 +69,17 @@ export interface ChatResponse {
   status: string;
 }
 
+export interface NotionNode {
+  id: string;
+  title: string;
+  children: NotionNode[];
+}
+
+export interface NotionTree {
+  public: NotionNode;
+  admin: NotionNode;
+}
+
 // ========== API ==========
 
 export const api = {
@@ -104,6 +115,8 @@ export const api = {
 
   resetChat: (session_id = "web") =>
     post<{ status: string }>("/chat/reset", { session_id }),
+
+  notionTree: () => get<NotionTree>("/notion/tree"),
 
   upload: async (file: File) => {
     const form = new FormData();
