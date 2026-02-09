@@ -40,14 +40,14 @@ class PMManager:
         now = datetime.now()
         end = now + timedelta(days=days)
         upcoming = [e for e in self.events 
-                    if now <= e.start_date <= end 
+                    if e.start_date and now <= e.start_date <= end 
                     and e.status not in [EventStatus.COMPLETED, EventStatus.CANCELLED]]
         return sorted(upcoming, key=lambda x: x.start_date)
     
     def get_today_events(self) -> List[Event]:
         """오늘 행사"""
         today = datetime.now().date()
-        return [e for e in self.events if e.start_date.date() == today]
+        return [e for e in self.events if e.start_date and e.start_date.date() == today]
     
     def generate_reminders(self) -> List[Reminder]:
         """D-day 리마인더 생성"""
@@ -56,6 +56,8 @@ class PMManager:
         
         for event in self.events:
             if event.status in [EventStatus.COMPLETED, EventStatus.CANCELLED]:
+                continue
+            if not event.start_date:
                 continue
             
             days_until = (event.start_date - now).days
@@ -89,7 +91,8 @@ class PMManager:
         """일정 충돌 감지"""
         conflicts = []
         events = [e for e in self.events 
-                  if e.status not in [EventStatus.COMPLETED, EventStatus.CANCELLED]]
+                  if e.status not in [EventStatus.COMPLETED, EventStatus.CANCELLED]
+                  and e.start_date is not None]
         
         for i, e1 in enumerate(events):
             for e2 in events[i+1:]:
@@ -106,7 +109,7 @@ class PMManager:
                     })
                 
                 # 같은 담당자, 시간 겹침
-                if e1.manager == e2.manager:
+                if e1.manager == e2.manager and e1.end_date and e2.end_date:
                     if not (e1.end_date <= e2.start_date or e2.end_date <= e1.start_date):
                         conflicts.append({
                             "event1": e1.title,
@@ -127,14 +130,15 @@ class PMManager:
         """기한 초과 태스크"""
         now = datetime.now()
         return [t for t in self.tasks 
-                if t.due_date < now and t.status not in [TaskStatus.DONE, TaskStatus.BLOCKED]]
+                if t.due_date and t.due_date < now
+                and t.status not in [TaskStatus.DONE, TaskStatus.BLOCKED]]
     
     def get_tasks_due_soon(self, days: int = 3) -> List[Task]:
         """곧 마감인 태스크"""
         now = datetime.now()
         end = now + timedelta(days=days)
         return [t for t in self.tasks 
-                if now <= t.due_date <= end 
+                if t.due_date and now <= t.due_date <= end 
                 and t.status not in [TaskStatus.DONE, TaskStatus.BLOCKED]]
     
     def get_tasks_by_assignee(self, assignee: str) -> List[Task]:
@@ -150,8 +154,9 @@ class PMManager:
         # 이벤트 매핑
         event_map = {e.id: e.title for e in self.events}
         
+        seen_ids = {i.task_id for i in items}
         for task in overdue + due_soon:
-            if task not in [i.task_id for i in items]:
+            if task.id not in seen_ids:
                 items.append(ActionItem(
                     task_id=task.id,
                     title=task.title,
@@ -159,6 +164,7 @@ class PMManager:
                     due_date=task.due_date,
                     event_title=event_map.get(task.event_id, "")
                 ))
+                seen_ids.add(task.id)
         
         return sorted(items, key=lambda x: x.due_date)
     
@@ -189,7 +195,7 @@ class PMManager:
             ])
         
         # 대규모 행사 추가 항목
-        if event.expected_attendees > 100:
+        if getattr(event, "expected_attendees", 0) and event.expected_attendees > 100:
             base_checklist.extend([
                 "주차 안내",
                 "안전요원 배치",
@@ -208,18 +214,18 @@ class PMManager:
         
         completed_this_week = [e for e in self.events 
                                if e.status == EventStatus.COMPLETED 
-                               and week_ago <= e.end_date <= now]
+                               and e.end_date and week_ago <= e.end_date <= now]
         
         upcoming_next_week = [e for e in self.events 
-                              if now <= e.start_date <= week_later
+                              if e.start_date and now <= e.start_date <= week_later
                               and e.status not in [EventStatus.COMPLETED, EventStatus.CANCELLED]]
         
         return {
             "period": f"{week_ago.strftime('%Y-%m-%d')} ~ {now.strftime('%Y-%m-%d')}",
             "completed_events": len(completed_this_week),
-            "completed_list": [{"title": e.title, "attendees": e.actual_attendees} for e in completed_this_week],
+            "completed_list": [{"title": e.title, "attendees": getattr(e, "actual_attendees", 0)} for e in completed_this_week],
             "upcoming_events": len(upcoming_next_week),
-            "upcoming_list": [{"title": e.title, "date": e.start_date.strftime('%Y-%m-%d')} for e in upcoming_next_week],
+            "upcoming_list": [{"title": e.title, "date": e.start_date.strftime('%Y-%m-%d') if e.start_date else ""} for e in upcoming_next_week],
             "pending_tasks": len(self.get_pending_tasks()),
             "overdue_tasks": len(self.get_overdue_tasks()),
             "conflicts": self.check_schedule_conflicts(),
@@ -231,7 +237,7 @@ class PMManager:
         return {
             "reminders": [r.__dict__ for r in self.generate_reminders()[:5]],
             "today_events": [{"title": e.title, "location": e.location} for e in self.get_today_events()],
-            "upcoming_events": [{"title": e.title, "date": e.start_date.strftime('%m/%d'), "days": (e.start_date - datetime.now()).days} 
+            "upcoming_events": [{"title": e.title, "date": e.start_date.strftime('%m/%d') if e.start_date else "", "days": (e.start_date - datetime.now()).days if e.start_date else 0} 
                                for e in self.get_upcoming_events(7)],
             "overdue_tasks": len(self.get_overdue_tasks()),
             "pending_tasks": len(self.get_pending_tasks()),

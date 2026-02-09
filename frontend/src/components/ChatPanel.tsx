@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Bot, User, Loader2, RotateCcw, Paperclip, Copy, Check, Download, X, FileText, Image as ImageIcon } from "lucide-react";
+import {
+  Send, Bot, Loader2, RotateCcw, Paperclip,
+  Copy, Check, Download, X, FileText, Image as ImageIcon, Globe,
+} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../api";
@@ -26,17 +29,12 @@ interface ChatPanelProps {
 }
 
 export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatPanelProps) {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: "assistant",
-      content:
-        '염시코기 2세입니다.\n20년간의 게시판 데이터를 바탕으로 답변합니다.\n\n예시 질문:\n- "2024 겨울행사 예산 알려줘"\n- "글램핑 장소 견적 찾아줘"\n- "작년 회의록 보여줘"\n- "노션에 여름행사 등록해줘"',
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const [webSearch, setWebSearch] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -50,7 +48,7 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
       await navigator.clipboard.writeText(text);
       setCopiedIdx(idx);
       setTimeout(() => setCopiedIdx(null), 1500);
-    } catch { /* clipboard not available */ }
+    } catch { /* */ }
   }, []);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -73,13 +71,11 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
       }
 
       const attached: AttachedFile = {
-        file,
-        name: file.name,
+        file, name: file.name,
         type: isImage ? "image" : "document",
         preview: isImage ? URL.createObjectURL(file) : undefined,
         uploading: true,
       };
-
       setAttachedFiles((prev) => [...prev, attached]);
 
       try {
@@ -97,7 +93,6 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
         );
       }
     }
-
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -134,9 +129,8 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
 
     try {
       let prefix = `[notion_target=${notionTarget}]`;
-      if (notionPageId) {
-        prefix += `[notion_page_id=${notionPageId}]`;
-      }
+      if (notionPageId) prefix += `[notion_page_id=${notionPageId}]`;
+      if (webSearch) prefix += `[web_search=enabled]`;
       prefix += " ";
       const fullMessage = prefix + (userMessage || "첨부한 파일을 분석해주세요.");
       const data = await api.chat(fullMessage, "web", fileContext || undefined);
@@ -152,9 +146,9 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
   };
 
   const resetChat = async () => {
-    try { await api.resetChat(); } catch { /* ignore */ }
+    try { await api.resetChat(); } catch { /* */ }
     setAttachedFiles([]);
-    setMessages([{ role: "assistant", content: "대화가 초기화되었습니다. 무엇이든 물어보세요." }]);
+    setMessages([]);
   };
 
   const downloadChat = () => {
@@ -173,70 +167,111 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
   const targetLabel = notionPageId
     ? notionPageTitle
     : notionTarget === "admin" ? "운영진" : "공개";
-
   const targetColor = notionTarget === "admin" ? "blue" : "green";
+
+  const isEmpty = messages.length === 0 && !isLoading;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-[48rem] mx-auto px-4 sm:px-6 py-6 space-y-6">
+        <div className="max-w-3xl mx-auto px-4 sm:px-6 py-6">
+          {/* Empty state */}
+          {isEmpty && (
+            <div className="flex flex-col items-center justify-center py-16 sm:py-24 animate-fade-in">
+              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-500/20 to-violet-500/20 border border-white/10 flex items-center justify-center mb-5">
+                <Bot size={28} className="text-blue-400" />
+              </div>
+              <h2 className="text-lg font-semibold text-white mb-1">염시코기 2세</h2>
+              <p className="text-xs text-slate-500 mb-8">20년간의 게시판 데이터 기반 AI 에이전트</p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full max-w-lg">
+                {[
+                  "2024 겨울행사 예산 알려줘",
+                  "글램핑 장소 견적 찾아줘",
+                  "작년 회의록 보여줘",
+                  "노션에 여름행사 등록해줘",
+                ].map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => { setInput(q); textareaRef.current?.focus(); }}
+                    className="text-left px-4 py-3 rounded-xl border border-white/8 bg-white/3 hover:bg-white/6 hover:border-white/15 text-xs text-slate-400 hover:text-slate-200 transition-all"
+                  >
+                    &ldquo;{q}&rdquo;
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Messages list */}
           {messages.map((msg, idx) => (
-            <div key={idx} className="group">
-              <div className="flex items-center gap-2 mb-2">
-                <div className={`w-7 h-7 rounded-full flex items-center justify-center ${
-                  msg.role === "user" ? "bg-blue-500" : "bg-white/10"
-                }`}>
-                  {msg.role === "user" ? <User size={14} className="text-white" /> : <Bot size={14} className="text-slate-300" />}
-                </div>
-                <span className="text-sm font-semibold text-slate-200">
-                  {msg.role === "user" ? "나" : "염시코기 2세"}
-                </span>
-                <button
-                  onClick={() => copyMessage(msg.content, idx)}
-                  className="opacity-0 group-hover:opacity-100 transition-opacity text-slate-600 hover:text-slate-300 p-0.5 rounded"
-                  title="복사"
-                >
-                  {copiedIdx === idx ? <Check size={13} /> : <Copy size={13} />}
-                </button>
-              </div>
-
-              <div className="pl-9">
-                {msg.role === "user" ? (
-                  <div className="text-[15px] text-slate-100 whitespace-pre-wrap leading-relaxed">{msg.content}</div>
-                ) : (
-                  <div className="text-[15px] text-slate-200 leading-7 prose prose-invert prose-base max-w-none prose-p:my-2.5 prose-li:my-0.5 prose-ul:my-2 prose-ol:my-2 prose-headings:my-3 prose-table:my-3 prose-th:px-3 prose-th:py-1.5 prose-td:px-3 prose-td:py-1.5 prose-th:border prose-th:border-white/10 prose-td:border prose-td:border-white/10 prose-a:text-blue-400 prose-code:text-emerald-300 prose-code:bg-white/5 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-[13px]">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+            <div key={idx} className={`group mb-6 ${msg.role === "user" ? "" : ""}`}>
+              {/* User message */}
+              {msg.role === "user" && (
+                <div className="flex justify-end">
+                  <div className="max-w-[85%] sm:max-w-[75%]">
+                    <div className="bg-blue-600/90 text-white rounded-2xl rounded-br-md px-4 py-3 text-[14px] leading-relaxed whitespace-pre-wrap">
+                      {msg.content}
+                    </div>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
 
-              {idx < messages.length - 1 && <div className="mt-6 border-b border-white/5" />}
+              {/* Assistant message */}
+              {msg.role === "assistant" && (
+                <div className="flex gap-3">
+                  <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500/20 to-violet-500/20 border border-white/10 flex items-center justify-center shrink-0 mt-0.5">
+                    <Bot size={16} className="text-blue-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="text-xs font-medium text-slate-400">염시코기 2세</span>
+                      <button
+                        onClick={() => copyMessage(msg.content, idx)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity text-slate-600 hover:text-slate-300 p-0.5 rounded"
+                        title="복사"
+                      >
+                        {copiedIdx === idx ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+                      </button>
+                    </div>
+                    <div className="text-[14px] text-slate-200 leading-7 prose prose-invert prose-sm max-w-none prose-p:my-2 prose-li:my-0.5 prose-ul:my-2 prose-ol:my-2 prose-headings:my-3 prose-headings:text-white prose-table:my-3 prose-th:px-3 prose-th:py-1.5 prose-td:px-3 prose-td:py-1.5 prose-th:border prose-th:border-white/10 prose-td:border prose-td:border-white/10 prose-a:text-blue-400 prose-code:text-emerald-300 prose-code:bg-white/5 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-[13px] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-blue-500/40 prose-blockquote:text-slate-300">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
 
+          {/* Loading indicator */}
           {isLoading && (
-            <div className="group">
-              <div className="flex items-center gap-2 mb-1.5">
-                <div className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center">
-                  <Loader2 size={12} className="text-slate-300" style={{ animation: "spin 1s linear infinite" }} />
-                </div>
-                <span className="text-xs font-medium text-slate-400">염시코기 2세</span>
+            <div className="flex gap-3 mb-6">
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500/20 to-violet-500/20 border border-white/10 flex items-center justify-center shrink-0">
+                <Loader2 size={16} className="text-blue-400 animate-spin" />
               </div>
-              <div className="pl-8 text-sm text-slate-500">생각 중...</div>
+              <div className="flex-1">
+                <span className="text-xs font-medium text-slate-400 block mb-2">염시코기 2세</span>
+                <div className="flex items-center gap-1.5 py-2">
+                  <span className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                  <span className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                  <span className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                </div>
+              </div>
             </div>
           )}
+
           <div ref={messagesEndRef} />
         </div>
       </div>
 
       {/* Attached files */}
       {attachedFiles.length > 0 && (
-        <div className="max-w-[48rem] mx-auto w-full px-4 sm:px-6 pt-2 flex gap-2 flex-wrap">
+        <div className="max-w-3xl mx-auto w-full px-4 sm:px-6 pt-2 flex gap-2 flex-wrap">
           {attachedFiles.map((f, idx) => (
             <div
               key={idx}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs border ${
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs border transition-colors ${
                 f.error
                   ? "border-red-500/30 bg-red-500/10 text-red-300"
                   : "border-white/10 bg-white/5 text-slate-300"
@@ -252,8 +287,8 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
                 <FileText size={14} />
               )}
               <span className="max-w-[120px] truncate">{f.name}</span>
-              {f.uploading && <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />}
-              {f.error && <span className="text-red-400">{f.error}</span>}
+              {f.uploading && <Loader2 size={12} className="animate-spin" />}
+              {f.error && <span className="text-red-400 text-xs">{f.error}</span>}
               <button onClick={() => removeFile(idx)} className="hover:text-white">
                 <X size={12} />
               </button>
@@ -263,9 +298,9 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
       )}
 
       {/* Input area */}
-      <div className="border-t border-white/5 bg-black/20">
-        <div className="max-w-[48rem] mx-auto px-4 sm:px-6 py-3">
-          <div className="relative bg-white/5 border border-white/10 rounded-2xl focus-within:ring-2 focus-within:ring-blue-500/40 focus-within:border-transparent transition-all">
+      <div className="border-t border-white/5">
+        <div className="max-w-3xl mx-auto px-4 sm:px-6 py-3">
+          <div className="relative bg-white/[0.04] border border-white/10 rounded-2xl focus-within:ring-2 focus-within:ring-blue-500/30 focus-within:border-blue-500/30 transition-all shadow-lg shadow-black/20">
             <textarea
               ref={textareaRef}
               value={input}
@@ -278,13 +313,13 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
               placeholder="메시지를 입력하세요..."
               disabled={isLoading}
-              rows={2}
-              className="w-full bg-transparent px-4 pt-3 pb-10 text-sm text-slate-100 placeholder-slate-500 focus:outline-none resize-none overflow-y-auto leading-relaxed"
+              rows={1}
+              className="w-full bg-transparent px-4 pt-3.5 pb-12 text-sm text-slate-100 placeholder-slate-600 focus:outline-none resize-none overflow-y-auto leading-relaxed"
               style={{ maxHeight: "200px" }}
             />
 
-            <div className="absolute bottom-0 left-0 right-0 px-3 pb-2 flex items-center justify-between">
-              <div className="flex items-center gap-1">
+            <div className="absolute bottom-0 left-0 right-0 px-3 pb-2.5 flex items-center justify-between">
+              <div className="flex items-center gap-0.5">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -296,56 +331,68 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isLoading}
-                  className="p-1.5 text-slate-500 hover:text-slate-300 transition-colors rounded-lg hover:bg-white/5 disabled:opacity-30"
+                  className="p-1.5 text-slate-600 hover:text-slate-300 transition-colors rounded-lg hover:bg-white/5 disabled:opacity-30"
                   title="파일 첨부"
                 >
-                  <Paperclip size={16} />
+                  <Paperclip size={15} />
                 </button>
                 <button
                   onClick={downloadChat}
-                  className="p-1.5 text-slate-500 hover:text-slate-300 transition-colors rounded-lg hover:bg-white/5"
-                  title="대화 다운로드"
+                  className="p-1.5 text-slate-600 hover:text-slate-300 transition-colors rounded-lg hover:bg-white/5"
+                  title="대화 내보내기"
                 >
-                  <Download size={16} />
+                  <Download size={15} />
                 </button>
                 <button
                   onClick={resetChat}
-                  className="p-1.5 text-slate-500 hover:text-slate-300 transition-colors rounded-lg hover:bg-white/5"
+                  className="p-1.5 text-slate-600 hover:text-slate-300 transition-colors rounded-lg hover:bg-white/5"
                   title="초기화"
                 >
-                  <RotateCcw size={16} />
+                  <RotateCcw size={15} />
                 </button>
 
-                <div className="h-4 w-px bg-white/10 mx-1" />
+                <div className="h-4 w-px bg-white/8 mx-1" />
 
-                {/* Notion target indicator */}
+                <button
+                  onClick={() => setWebSearch((v) => !v)}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border transition-colors ${
+                    webSearch
+                      ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-400"
+                      : "border-white/8 bg-white/3 text-slate-600 hover:text-slate-400"
+                  }`}
+                  title="웹 검색 활성화"
+                >
+                  <Globe size={13} />
+                  <span>웹</span>
+                </button>
+
                 <div
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-medium border ${
+                  className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium border ${
                     targetColor === "blue"
-                      ? "border-blue-500/30 bg-blue-500/10 text-blue-300"
-                      : "border-green-500/30 bg-green-500/10 text-green-300"
+                      ? "border-blue-500/20 bg-blue-500/8 text-blue-400"
+                      : "border-green-500/20 bg-green-500/8 text-green-400"
                   }`}
                   title="Notion 패널에서 대상 선택"
                 >
                   <span className={`w-1.5 h-1.5 rounded-full ${
                     targetColor === "blue" ? "bg-blue-400" : "bg-green-400"
                   }`} />
-                  <span className="max-w-[100px] truncate">{targetLabel}</span>
+                  <span className="max-w-[80px] truncate">{targetLabel}</span>
                 </div>
               </div>
 
               <button
                 onClick={sendMessage}
                 disabled={isLoading || (!input.trim() && attachedFiles.length === 0)}
-                className="p-2 bg-white/90 hover:bg-white text-slate-900 rounded-lg transition-all disabled:opacity-20 disabled:cursor-not-allowed"
+                className="p-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl transition-all disabled:opacity-20 disabled:cursor-not-allowed"
               >
-                <Send size={16} />
+                <Send size={15} />
               </button>
             </div>
           </div>
 
-          <p className="text-center text-[10px] text-slate-600 mt-2">
-            Shift+Enter로 줄바꿈 / 첨부파일: PDF, DOCX, XLSX, 이미지 / 우측 Notion 패널에서 대상 폴더 선택
+          <p className="text-center text-xs text-slate-700 mt-2">
+            Shift+Enter 줄바꿈 / 첨부: PDF, DOCX, XLSX, 이미지
           </p>
         </div>
       </div>

@@ -33,22 +33,25 @@ class StatsAnalyzer:
     
     def total_attendees(self) -> int:
         """총 참석자 수"""
-        return sum(e.actual_attendees for e in self.events)
+        return sum(getattr(e, "actual_attendees", 0) or 0 for e in self.events)
     
     def total_budget(self) -> int:
         """총 예산"""
-        return sum(e.budget for e in self.events)
+        return sum(getattr(e, "budget", 0) or 0 for e in self.events)
     
     def total_actual_cost(self) -> int:
         """총 실제 비용"""
-        return sum(e.actual_cost for e in self.events)
+        return sum(getattr(e, "actual_cost", 0) or 0 for e in self.events)
     
     def average_attendance_rate(self) -> float:
         """평균 참석률"""
-        completed = [e for e in self.events if e.status == EventStatus.COMPLETED and e.expected_attendees > 0]
+        completed = [e for e in self.events
+                     if e.status == EventStatus.COMPLETED
+                     and getattr(e, "expected_attendees", 0)
+                     and e.expected_attendees > 0]
         if not completed:
             return 0.0
-        rates = [e.actual_attendees / e.expected_attendees for e in completed]
+        rates = [(getattr(e, "actual_attendees", 0) or 0) / e.expected_attendees for e in completed]
         return sum(rates) / len(rates) * 100
     
     # ========== 분석 통계 ==========
@@ -64,6 +67,8 @@ class StatsAnalyzer:
         """월별 행사 수"""
         result = defaultdict(int)
         for e in self.events:
+            if not e.start_date:
+                continue
             key = e.start_date.strftime("%Y-%m")
             result[key] += 1
         return dict(sorted(result.items()))
@@ -72,6 +77,8 @@ class StatsAnalyzer:
         """연도별 행사 수"""
         result = defaultdict(int)
         for e in self.events:
+            if not e.start_date:
+                continue
             result[e.start_date.year] += 1
         return dict(sorted(result.items()))
     
@@ -80,6 +87,8 @@ class StatsAnalyzer:
         weekdays = ["월", "화", "수", "목", "금", "토", "일"]
         result = defaultdict(int)
         for e in self.events:
+            if not e.start_date:
+                continue
             result[weekdays[e.start_date.weekday()]] += 1
         return {d: result[d] for d in weekdays}
     
@@ -87,14 +96,14 @@ class StatsAnalyzer:
         """담당자별 행사 수"""
         result = defaultdict(int)
         for e in self.events:
-            result[e.manager] += 1
+            result[getattr(e, "manager", "") or ""] += 1
         return dict(sorted(result.items(), key=lambda x: x[1], reverse=True))
     
     def events_by_location(self) -> Dict[str, int]:
         """장소별 행사 수"""
         result = defaultdict(int)
         for e in self.events:
-            result[e.location] += 1
+            result[getattr(e, "location", "") or ""] += 1
         return dict(sorted(result.items(), key=lambda x: x[1], reverse=True))
     
     def online_vs_offline(self) -> Dict[str, int]:
@@ -119,14 +128,16 @@ class StatsAnalyzer:
     def top_events_by_attendance(self, n: int = 10) -> List[Dict]:
         """참석자 많은 행사 TOP N"""
         completed = [e for e in self.events if e.status == EventStatus.COMPLETED]
-        sorted_events = sorted(completed, key=lambda x: x.actual_attendees, reverse=True)[:n]
-        return [{"title": e.title, "attendees": e.actual_attendees, "date": e.start_date.strftime("%Y-%m-%d")} 
+        sorted_events = sorted(completed, key=lambda x: getattr(x, "actual_attendees", 0) or 0, reverse=True)[:n]
+        return [{"title": e.title, "attendees": getattr(e, "actual_attendees", 0),
+                 "date": e.start_date.strftime("%Y-%m-%d") if e.start_date else ""} 
                 for e in sorted_events]
     
     def top_events_by_budget(self, n: int = 10) -> List[Dict]:
         """예산 높은 행사 TOP N"""
-        sorted_events = sorted(self.events, key=lambda x: x.budget, reverse=True)[:n]
-        return [{"title": e.title, "budget": e.budget, "date": e.start_date.strftime("%Y-%m-%d")} 
+        sorted_events = sorted(self.events, key=lambda x: getattr(x, "budget", 0) or 0, reverse=True)[:n]
+        return [{"title": e.title, "budget": getattr(e, "budget", 0),
+                 "date": e.start_date.strftime("%Y-%m-%d") if e.start_date else ""} 
                 for e in sorted_events]
     
     # ========== 태스크 통계 ==========
@@ -135,14 +146,14 @@ class StatsAnalyzer:
         """태스크 완료율"""
         if not self.tasks:
             return 0.0
-        done = sum(1 for t in self.tasks if t.status.value == "완료")
+        done = sum(1 for t in self.tasks if t.status and t.status.value == "완료")
         return done / len(self.tasks) * 100
     
     def tasks_by_status(self) -> Dict[str, int]:
         """상태별 태스크 수"""
         result = defaultdict(int)
         for t in self.tasks:
-            result[t.status.value] += 1
+            result[t.status.value if t.status else "미지정"] += 1
         return dict(result)
     
     def tasks_by_assignee(self) -> Dict[str, int]:
@@ -156,7 +167,8 @@ class StatsAnalyzer:
         """기한 초과 태스크"""
         now = datetime.now()
         return [t for t in self.tasks 
-                if t.due_date < now and t.status.value not in ["완료", "보류"]]
+                if t.due_date and t.due_date < now
+                and t.status and t.status.value not in ["완료", "보류"]]
     
     # ========== 예산 통계 ==========
     

@@ -10,6 +10,8 @@ import {
   X,
   PanelRightOpen,
   PanelRightClose,
+  Mic,
+  FolderSearch,
 } from "lucide-react";
 import {
   StatCard,
@@ -18,15 +20,19 @@ import {
   RecentPosts,
   ChatPanel,
   NotionPanel,
+  MinutesPanel,
+  DocumentsPanel,
 } from "./components";
 import type { DashboardData, PostStats } from "./api";
 import { api } from "./api";
 import "./index.css";
 
-type Tab = "dashboard" | "chat";
+type Tab = "chat" | "minutes" | "documents" | "dashboard";
 
 const NAV: { id: Tab; icon: typeof LayoutDashboard; label: string }[] = [
   { id: "chat", icon: MessageSquare, label: "AI 채팅" },
+  { id: "minutes", icon: Mic, label: "회의록" },
+  { id: "documents", icon: FolderSearch, label: "문서" },
   { id: "dashboard", icon: LayoutDashboard, label: "대시보드" },
 ];
 
@@ -81,6 +87,8 @@ export default function App() {
     ? Object.entries(stats.by_author).slice(0, 10).map(([name, count]) => ({ name, count }))
     : [];
 
+  const showNotionPanel = activeTab === "chat";
+
   return (
     <div className="h-screen flex overflow-hidden">
       {/* Sidebar overlay (mobile) */}
@@ -93,15 +101,15 @@ export default function App() {
 
       {/* Sidebar */}
       <aside
-        className={`fixed lg:static inset-y-0 left-0 z-50 w-64 bg-black/60 backdrop-blur-2xl border-r border-white/10 flex flex-col transition-transform duration-200 lg:translate-x-0 ${
+        className={`fixed lg:static inset-y-0 left-0 z-50 w-56 bg-black/60 backdrop-blur-2xl border-r border-white/10 flex flex-col transition-transform duration-200 lg:translate-x-0 ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        <div className="px-5 py-5 border-b border-white/5">
+        <div className="px-4 py-4 border-b border-white/5">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-lg font-bold text-white tracking-tight">염시코기 2세</h1>
-              <p className="text-[11px] text-slate-500 mt-0.5">기획위원장 과로사 방지 AI Agent</p>
+              <h1 className="text-base font-bold text-white tracking-tight">염시코기 2세</h1>
+              <p className="text-xs text-slate-500 mt-0.5">기획위원장 과로사 방지 AI</p>
             </div>
             <button
               onClick={() => setSidebarOpen(false)}
@@ -112,24 +120,24 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="flex-1 px-3 py-4 space-y-1">
+        <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
           {NAV.map(({ id, icon: Icon, label }) => (
             <button
               key={id}
               onClick={() => switchTab(id)}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors ${
                 activeTab === id
                   ? "bg-white/10 text-white"
                   : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
               }`}
             >
-              <Icon size={18} />
+              <Icon size={16} />
               {label}
             </button>
           ))}
         </nav>
 
-        <div className="px-5 py-4 border-t border-white/5">
+        <div className="px-4 py-3 border-t border-white/5">
           {stats ? (
             <div className="flex items-center gap-2 text-xs text-slate-500">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
@@ -154,7 +162,7 @@ export default function App() {
           <span className="flex-1 text-sm font-semibold text-white">
             {NAV.find((n) => n.id === activeTab)?.label}
           </span>
-          {activeTab === "chat" && (
+          {showNotionPanel && (
             <button
               onClick={() => setNotionPanelOpen(!notionPanelOpen)}
               className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-white/5"
@@ -166,7 +174,7 @@ export default function App() {
 
         {/* Content with optional right panel */}
         <div className="flex-1 flex min-h-0">
-          {/* Chat / Dashboard */}
+          {/* Pages */}
           <div className="flex-1 flex flex-col min-w-0">
             {activeTab === "chat" && (
               <ChatPanel
@@ -175,6 +183,8 @@ export default function App() {
                 notionPageTitle={notionPageTitle}
               />
             )}
+            {activeTab === "minutes" && <MinutesPanel />}
+            {activeTab === "documents" && <DocumentsPanel />}
 
             {activeTab === "dashboard" && (
               <main className="flex-1 overflow-y-auto px-4 sm:px-8 py-6 sm:py-8">
@@ -209,26 +219,36 @@ export default function App() {
             )}
           </div>
 
-          {/* Right panel - Notion tree (desktop: always visible in chat, mobile: toggle) */}
-          {activeTab === "chat" && (
-            <aside
-              className={`border-l border-white/10 bg-black/40 backdrop-blur-xl flex flex-col shrink-0 transition-all duration-200 ${
-                notionPanelOpen
-                  ? "w-64 fixed inset-y-0 right-0 z-50 lg:static lg:z-auto"
-                  : "w-64 hidden xl:flex"
-              }`}
-            >
-              <NotionPanel
-                selectedPageId={notionPageId}
-                onSelectPage={handleNotionSelect}
-              />
-            </aside>
+          {/* Right panel - Notion tree */}
+          {showNotionPanel && (
+            <>
+              {/* Mobile/tablet backdrop */}
+              {notionPanelOpen && (
+                <div
+                  className="fixed inset-0 bg-black/60 z-40 xl:hidden"
+                  onClick={() => setNotionPanelOpen(false)}
+                />
+              )}
+              <aside
+                className={`border-l border-white/10 bg-black/40 backdrop-blur-xl flex flex-col shrink-0 transition-all duration-200 ${
+                  notionPanelOpen
+                    ? "w-60 fixed inset-y-0 right-0 z-50 lg:static lg:z-auto"
+                    : "w-60 hidden xl:flex"
+                }`}
+              >
+                <NotionPanel
+                  selectedPageId={notionPageId}
+                  onSelectPage={handleNotionSelect}
+                  onClose={() => setNotionPanelOpen(false)}
+                />
+              </aside>
+            </>
           )}
         </div>
       </div>
 
       {/* Notion panel toggle (desktop, when hidden) */}
-      {activeTab === "chat" && (
+      {showNotionPanel && (
         <button
           onClick={() => setNotionPanelOpen(!notionPanelOpen)}
           className="hidden lg:flex xl:hidden fixed right-4 bottom-4 z-30 p-2.5 bg-white/10 backdrop-blur-xl border border-white/10 rounded-xl text-slate-400 hover:text-white transition-colors"

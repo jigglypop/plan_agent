@@ -413,7 +413,7 @@ class MensaCrawler(BaseCrawler):
         return events
 
     def fetch_event_detail(self, event_id: str) -> Event:
-        return None
+        raise NotImplementedError("fetch_event_detail는 아직 구현되지 않았습니다.")
 
     def close(self):
         """연결 해제 (브라우저는 닫지 않음)"""

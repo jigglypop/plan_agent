@@ -4,15 +4,19 @@ MCP 서버 - Claude와 연동
 """
 import os
 import sys
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-# 경로 설정
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 프로젝트 루트를 sys.path에 추가 (패키지 외부 실행 대응)
+_project_root = str(Path(__file__).resolve().parent.parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 from dotenv import load_dotenv
 load_dotenv()
 
+from src import format_post_item, format_search_item, prepare_vdb_payload
 from src.data import load_posts, get_post_by_id, filter_posts, get_post_stats, list_files
 from src.vectordb import VectorStore
 from src.notion import NotionClient
@@ -64,20 +68,13 @@ def search_posts(query: str, limit: int = 5) -> list[dict]:
     store = get_store()
     posts = get_posts()
     results = store.search_posts(query, limit)
-    output = []
-    for r in results:
-        post = get_post_by_id(posts, r["id"])
-        meta = r.get("metadata", {})
-        output.append({
-            "id": r["id"],
-            "title": meta.get("title", ""),
-            "author": meta.get("author", ""),
-            "date": meta.get("date", ""),
-            "content_preview": (post.get("content", "")[:500] if post else ""),
-            "files": [f.get("name", "") for f in (post or {}).get("files", [])],
-            "relevance": round(1 - r.get("distance", 0), 3),
-        })
-    return output
+    return [
+        format_search_item(
+            r, get_post_by_id(posts, r["id"]),
+            include_relevance=True, include_files=True,
+        )
+        for r in results
+    ]
 
 
 @mcp.tool()
@@ -114,16 +111,7 @@ def filter_board_posts(year: int = None, author: str = None, keyword: str = None
     """
     posts = get_posts()
     filtered = filter_posts(posts, year=year, author=author, keyword=keyword, limit=limit)
-    return [
-        {
-            "id": p["id"],
-            "title": p["title"],
-            "author": p.get("author", ""),
-            "date": p.get("date", ""),
-            "files_count": len(p.get("files", [])),
-        }
-        for p in filtered
-    ]
+    return [format_post_item(p) for p in filtered]
 
 
 # ========== 통계 도구 ==========
@@ -180,17 +168,7 @@ def reload_vectordb() -> str:
     """
     store = get_store()
     posts = load_posts()
-    store.add_posts_batch([
-        {
-            "id": p["id"],
-            "title": p["title"],
-            "content": p.get("content", ""),
-            "author": p.get("author", ""),
-            "date": p.get("date", ""),
-            "url": p.get("url", ""),
-        }
-        for p in posts
-    ])
+    store.add_posts_batch(prepare_vdb_payload(posts))
     stats = store.get_stats()
     return f"로드 완료: 게시글 {stats['posts']}건"
 
@@ -225,6 +203,86 @@ def notion_status() -> dict:
         "token_set": bool(os.getenv("NOTION_TOKEN")),
         "database_id_set": bool(os.getenv("NOTION_DATABASE_ID"))
     }
+
+
+# ========== 웹 도구 ==========
+
+@mcp.tool()
+def fetch_webpage(url: str) -> dict:
+    """
+    웹 페이지 텍스트를 가져옵니다.
+
+    Args:
+        url: 가져올 URL
+
+    Returns:
+        title, content (최대 6000자)
+    """
+    import requests as _req
+    from bs4 import BeautifulSoup
+
+    try:
+        resp = _req.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; PlanAgent/1.0)"}, timeout=10)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding or "utf-8"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            tag.decompose()
+        title = soup.title.string.strip() if soup.title and soup.title.string else ""
+        lines = [l for l in soup.get_text(separator="\n", strip=True).split("\n") if l.strip()]
+        return {"url": url, "title": title, "content": "\n".join(lines)[:6000]}
+    except Exception as e:
+        return {"error": str(e), "url": url}
+
+
+@mcp.tool()
+def web_search(query: str, limit: int = 5) -> list[dict]:
+    """
+    인터넷 검색을 수행합니다 (Brave Search API 우선, fallback DuckDuckGo).
+
+    Args:
+        query: 검색어
+        limit: 결과 수 (최대 10)
+
+    Returns:
+        검색 결과 목록 (title, url, description)
+    """
+    import requests as _req
+    n = min(limit, 10)
+    api_key = os.getenv("BRAVE_API_KEY", "")
+
+    if api_key:
+        try:
+            resp = _req.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={"Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": api_key},
+                params={"q": query, "count": n}, timeout=10,
+            )
+            resp.raise_for_status()
+            return [
+                {"title": r.get("title", ""), "url": r.get("url", ""), "description": r.get("description", "")[:300]}
+                for r in resp.json().get("web", {}).get("results", [])[:n]
+            ]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    # fallback: DuckDuckGo
+    try:
+        from bs4 import BeautifulSoup
+        resp = _req.get(
+            "https://html.duckduckgo.com/html/", params={"q": query},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; PlanAgent/1.0)"}, timeout=10,
+        )
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = []
+        for r in soup.select(".result")[:n]:
+            t = r.select_one(".result__title a")
+            s = r.select_one(".result__snippet")
+            if t:
+                results.append({"title": t.get_text(strip=True), "url": t.get("href", ""), "description": s.get_text(strip=True)[:300] if s else ""})
+        return results or [{"message": "결과 없음"}]
+    except Exception as e:
+        return [{"error": str(e)}]
 
 
 # ========== 리소스 ==========

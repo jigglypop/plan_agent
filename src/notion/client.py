@@ -37,14 +37,15 @@ class NotionClient:
             return []
         
         try:
-            response = self.client.search(filter={"property": "object", "value": "database"})
+            response = self.client.search()
             return [
                 {
                     "id": db["id"],
-                    "title": db["title"][0]["plain_text"] if db.get("title") else "Untitled",
+                    "title": db["title"][0]["plain_text"] if db.get("title") and len(db["title"]) > 0 else "Untitled",
                     "url": db.get("url", "")
                 }
                 for db in response.get("results", [])
+                if db.get("object") == "database"
             ]
         except Exception as e:
             logger.exception("Error listing databases: %s", e)
@@ -201,3 +202,81 @@ class NotionClient:
             }
             for item in items
         ]
+
+    @staticmethod
+    def make_to_do(text: str, checked: bool = False) -> Dict:
+        """할 일 블록 생성"""
+        return {
+            "object": "block",
+            "type": "to_do",
+            "to_do": {
+                "rich_text": [{"type": "text", "text": {"content": text}}],
+                "checked": checked,
+            }
+        }
+
+    @staticmethod
+    def make_divider() -> Dict:
+        """구분선 블록 생성"""
+        return {"object": "block", "type": "divider", "divider": {}}
+
+    @staticmethod
+    def make_callout(text: str) -> Dict:
+        """콜아웃 블록 생성"""
+        return {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [{"type": "text", "text": {"content": text}}],
+            }
+        }
+
+    # ========== DB 생성/관리 ==========
+
+    def create_database(self, parent_page_id: str, title: str, properties: Dict) -> Optional[Dict]:
+        """데이터베이스 생성"""
+        if not self.client:
+            return None
+        try:
+            return self.client.databases.create(
+                parent={"page_id": parent_page_id},
+                title=[{"text": {"content": title}}],
+                properties=properties,
+            )
+        except Exception as e:
+            logger.exception("Error creating database: %s", e)
+            return None
+
+    def archive_page(self, page_id: str) -> Optional[Dict]:
+        """페이지 아카이브 (삭제 대용)"""
+        if not self.client:
+            return None
+        try:
+            return self.client.pages.update(page_id=page_id, archived=True)
+        except Exception as e:
+            logger.exception("Error archiving page: %s", e)
+            return None
+
+    def get_block_children(self, block_id: str, page_size: int = 50) -> List[Dict]:
+        """블록의 자식 블록 조회"""
+        if not self.client:
+            return []
+        try:
+            resp = self.client.blocks.children.list(block_id=block_id, page_size=page_size)
+            return resp.get("results", [])
+        except Exception as e:
+            logger.exception("Error getting block children: %s", e)
+            return []
+
+    def add_comment(self, page_id: str, text: str) -> Optional[Dict]:
+        """페이지에 댓글 추가"""
+        if not self.client:
+            return None
+        try:
+            return self.client.comments.create(
+                parent={"page_id": page_id},
+                rich_text=[{"type": "text", "text": {"content": text}}],
+            )
+        except Exception as e:
+            logger.exception("Error adding comment: %s", e)
+            return None

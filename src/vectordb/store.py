@@ -464,11 +464,16 @@ class VectorStore:
 
 def init_vector_store_from_json(json_path: str = None, dept: str = DEFAULT_DEPT):
     """crawled.json에서 벡터 스토어 초기화"""
+    from src import prepare_vdb_payload
     from src.data import load_posts
     from src.data.parser import enrich_posts_with_files
 
     store = VectorStore()
-    posts = load_posts(json_path)
+    try:
+        posts = load_posts(json_path)
+    except Exception as e:
+        logger.exception("데이터 로드 실패: %s", e)
+        return store
 
     force = os.getenv("VDB_FORCE_INDEX", "0").strip() in ("1", "true", "True")
     stats = store.get_stats(dept)
@@ -480,20 +485,12 @@ def init_vector_store_from_json(json_path: str = None, dept: str = DEFAULT_DEPT)
         return store
 
     logger.warning("첨부파일 파싱 시작... (posts=%d, dept=%s)", len(posts), dept)
-    posts = enrich_posts_with_files(posts)
+    try:
+        posts = enrich_posts_with_files(posts)
+    except Exception as e:
+        logger.exception("첨부파일 파싱 실패: %s", e)
 
-    store.add_posts_batch([
-        {
-            "id": p["id"],
-            "title": p["title"],
-            "content": p.get("content", ""),
-            "file_content": p.get("file_content", ""),
-            "author": p.get("author", ""),
-            "date": p.get("date", ""),
-            "url": p.get("url", ""),
-        }
-        for p in posts
-    ], dept=dept)
+    store.add_posts_batch(prepare_vdb_payload(posts), dept=dept)
 
     logger.warning("벡터 스토어 초기화 완료 (dept=%s): %s", dept, store.get_stats(dept))
     return store

@@ -1,27 +1,27 @@
 """
 AI 에이전트 코어
-ReAct 패턴: 도구 호출 -> 결과 확인 -> 추가 도구 호출 or 최종 응답
+LangGraph create_react_agent 기반 ReAct 에이전트
 """
 import os
-import json
 import logging
+import sqlite3
 import threading
-import time
-from typing import Dict, Any
+from pathlib import Path
+from typing import Dict, Any, AsyncGenerator
+from langchain_openai import ChatOpenAI
+from langchain_core.tools import StructuredTool
+from langchain_core.messages.utils import trim_messages, count_tokens_approximately
+from langgraph.prebuilt import create_react_agent
+from langgraph.checkpoint.sqlite import SqliteSaver
 
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-    OpenAI = None
-
+from src import prepare_vdb_payload
 from src.data import load_posts, get_post_stats
 from src.data.parser import enrich_posts_with_files
 from src.vectordb import VectorStore
 from src.notion import NotionClient
-from src.agent.tools import TOOLS, ToolExecutor
-from src.agent.memory import Memory
+from src.agent.tools import (
+    inject_deps, get_search_tools, get_notion_tools,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -35,48 +35,218 @@ SYSTEM_PROMPT = """당신은 멘사코리아 기획위원회의 AI 에이전트 
 역할:
 1. 과거 행사 검색 및 정보 제공 (예산, 장소, 참석자 수, 견적 등)
 2. 회의록 검색 및 요약
-3. 예산/결산 관련 자료 검색 및 분석
+3. 예산/결산 관련 자료 검색 및 분석 + 첨부파일 AI 분석
 4. 행사 기획 시 참고 자료 제공 (과거 유사 행사 기반)
-5. 노션에 행사/체크리스트 생성
+5. 노션에 행사/체크리스트 생성, 노션 DB 조회
+6. 위원회 운영 관련 정보 제공
 
 노션 경로:
 - 공개용(public): 외부에 공개되는 정보 (행사 안내, 공지 등). target="public"으로 지정.
 - 운영진용(admin): 내부 운영 자료 (예산, 회의록, 기획 메모 등). target="admin"으로 지정.
 - 사용자가 "공개"/"외부"/"공지"라고 하면 public, "운영진"/"내부"/"회의"라고 하면 admin으로 판단.
-6. 위원회 운영 관련 정보 제공
 
 도구 사용 규칙:
-- 복잡한 질문은 여러 도구를 순차적으로 호출하여 답변 (예: 검색 -> 상세 조회 -> 분석)
-- search_posts로 관련 게시글을 찾고, 필요하면 get_post로 전문을 확인
+- 복잡한 질문은 여러 도구를 순차적으로 호출하여 답변 (예: 검색 -> 상세 조회 -> 파일 분석)
+- search_posts로 관련 게시글을 찾고, 필요하면 get_post로 전문 확인, analyze_file로 첨부파일 AI 분석
 - 수치가 있으면 구체적으로 제시하고 출처(게시글 제목, 날짜)를 함께 안내
 - 모르는 내용은 모른다고 솔직하게 답변
+
+출처 표기 규칙:
+- 게시글을 인용할 때 반드시 마크다운 링크로 출처를 포함: [게시글 제목](URL)
+- 노션 페이지를 생성하면 반드시 [페이지 제목](notion URL)을 응답에 포함
+- URL이 없는 경우에만 텍스트로 제목과 날짜를 표기
+
+전문가 에이전트:
+- search_expert: 게시판 데이터 검색/분석 + 웹 검색/페이지 읽기가 필요할 때 호출 (과거 행사, 예산, 회의록, 장소 견적, 첨부파일 분석, 외부 정보 검색 등)
+- notion_expert: 노션 콘텐츠 생성/관리/조회가 필요할 때 호출 (행사 등록, 페이지 작성, 칸반보드, DB 쿼리, 체크리스트 생성)
+
+위임 규칙:
+- 간단한 인사/일반 질문은 직접 답변
+- 데이터 검색 또는 첨부파일 분석이 필요하면 search_expert에게 위임
+- 노션 작업(생성/조회/수정/삭제/DB 쿼리/칸반보드/체크리스트/댓글)이 필요하면 notion_expert에게 위임
+- 복합 요청(예: "과거 예산 찾아서 노션에 정리")은 순차 위임: search_expert -> notion_expert
 
 응답 규칙:
 - 한국어로 간결하고 정확하게 답변
 - 이모지 사용 금지
 """
 
-MAX_TOOL_STEPS = 5
+
+SEARCH_PROMPT = """당신은 데이터 검색/분석 전문가입니다.
+멘사코리아 기획위원회 게시판 데이터(2005~현재, 회의록/예산안/행사기획/결산/장소견적)를 검색하고 분석합니다.
+
+도구 활용 순서:
+1. search_posts로 관련 게시글 시맨틱 검색
+2. 필요하면 get_post로 상세 내용 확인
+3. analyze_file로 첨부파일(Excel/PDF/PPT) AI 분석 (예산안, 견적서 해석)
+4. get_stats로 전체 통계, list_attached_files로 첨부파일 검색
+5. web_search로 외부 정보 검색 (장소, 가격, 최신 뉴스 등)
+6. fetch_webpage로 특정 URL의 내용 읽기 (검색 결과의 상세 페이지 등)
+
+응답 규칙:
+- 수치와 출처를 반드시 포함. 출처는 마크다운 링크로: [제목](url)
+- URL 필드가 있는 게시글은 반드시 링크로 표시
+- 한국어로 간결하게
+- 이모지 금지
+"""
+
+
+_NOTION_DB_ID = os.getenv("NOTION_DATABASE_ID", "")
+_NOTION_PUBLIC_ID = os.getenv("NOTION_PUBLIC_PAGE_ID", "")
+_NOTION_ADMIN_ID = os.getenv("NOTION_ADMIN_PAGE_ID", "")
+
+NOTION_PROMPT = f"""당신은 노션 관리 전문가입니다.
+멘사코리아 기획위원회 노션에 행사, 페이지, 칸반보드, 체크리스트를 생성하고 기존 콘텐츠를 조회/수정/삭제합니다.
+
+기본 ID:
+- 행사 데이터베이스 ID: {_NOTION_DB_ID}
+- 공개 페이지 ID: {_NOTION_PUBLIC_ID}
+- 운영진 페이지 ID: {_NOTION_ADMIN_ID}
+DB 조회시 위 database_id를 바로 사용하세요. list_notion_databases를 먼저 호출할 필요 없습니다.
+
+도구:
+- create_notion_event: 행사 DB에 새 행사 등록
+- create_notion_page: 자유 형식 페이지 작성 (회의록, 공지, 기획서 등)
+- create_notion_board: 칸반보드(데이터베이스) 생성. 상태/담당자/기한/우선순위 컬럼 포함.
+- create_notion_checklist: 체크리스트(할일 목록) 페이지 생성
+- update_notion_item: DB 항목 속성 변경 (상태 이동, 담당자 변경 등)
+- update_notion_page_content: 기존 페이지에 텍스트 블록 추가
+- read_notion_page: 페이지 제목과 본문 읽기
+- archive_notion_page: 페이지 아카이브(삭제)
+- add_notion_comment: 페이지에 댓글 추가
+- query_notion: 기존 노션 콘텐츠 조회
+- list_notion_databases: 접근 가능한 노션 DB 목록 조회
+- query_notion_database: 노션 DB에서 항목 필터링 조회 (상태, 카테고리 등)
+
+응답에 생성/수정된 페이지 URL을 반드시 마크다운 링크로 포함: [제목](url)
+한국어로 간결하게.
+"""
+
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2")
+MAX_TOKENS = int(os.getenv("SESSION_MAX_TOKENS", "8000"))
+MEMORY_DB = Path(__file__).parent.parent.parent / "data" / "checkpoints.db"
+
+
+def _parse_notion_prefix(user_message: str) -> tuple:
+    """노션 대상 프리픽스 파싱 -> (notion_target, notion_page_id, clean_message)"""
+    notion_target = "admin"
+    notion_page_id = ""
+    clean = user_message
+
+    if clean.startswith("[notion_target="):
+        end = clean.find("]")
+        if end != -1:
+            notion_target = clean[len("[notion_target="):end].strip()
+            clean = clean[end + 1:].strip()
+
+    if clean.startswith("[notion_page_id="):
+        end = clean.find("]")
+        if end != -1:
+            notion_page_id = clean[len("[notion_page_id="):end].strip()
+            clean = clean[end + 1:].strip()
+
+    return notion_target, notion_page_id, clean
+
+
+SUB_AGENT_MAX_TOKENS = int(os.getenv("SUB_AGENT_MAX_TOKENS", "60000"))
+
+
+def _pre_model_hook(state):
+    """LLM 호출 전 메시지 트리밍 (슈퍼바이저)"""
+    trimmed = trim_messages(
+        state["messages"],
+        strategy="last",
+        token_counter=count_tokens_approximately,
+        max_tokens=MAX_TOKENS,
+        start_on="human",
+        end_on=("human", "tool"),
+    )
+    return {"llm_input_messages": trimmed}
+
+
+def _sub_agent_hook(state):
+    """서브 에이전트용 트리밍 (도구 결과 누적 방지)"""
+    trimmed = trim_messages(
+        state["messages"],
+        strategy="last",
+        token_counter=count_tokens_approximately,
+        max_tokens=SUB_AGENT_MAX_TOKENS,
+        start_on="human",
+        end_on=("human", "tool"),
+    )
+    return {"llm_input_messages": trimmed}
+
+
+def _create_agent_tool(graph, name: str, description: str) -> StructuredTool:
+    """에이전트 서브그래프를 슈퍼바이저용 도구로 래핑"""
+    def _invoke(request: str) -> str:
+        result = graph.invoke({"messages": [("user", request)]})
+        msgs = result.get("messages")
+        return msgs[-1].content if msgs else ""
+
+    return StructuredTool.from_function(
+        func=_invoke, name=name, description=description,
+    )
 
 
 class Agent:
-    """AI 에이전트 - ReAct 패턴 + 영속 기억"""
+    """AI 에이전트 - LangGraph ReAct"""
 
     def __init__(self):
-        self.client = None
-        if OPENAI_AVAILABLE and os.getenv("OPENAI_API_KEY"):
-            self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
         self.posts = load_posts()
         enrich_posts_with_files(self.posts)
         self.vector_store = VectorStore()
         self.notion = NotionClient()
-        self.memory = Memory()
-        self.executor = ToolExecutor(self.posts, self.vector_store, self.notion)
 
-        # 런타임 세션 (도구 호출 포함 전체 메시지)
-        self._sessions: Dict[str, list] = {}
-        self._session_last_access: Dict[str, float] = {}
+        # 도구에 의존성 주입
+        inject_deps(self.posts, self.vector_store, self.notion)
+
+        # 멀티 에이전트 그래프 생성
+        self._model_available = bool(os.getenv("OPENAI_API_KEY"))
+        self.graph = None
+        self._checkpointer = None
+
+        if self._model_available:
+            model = ChatOpenAI(
+                model=DEFAULT_MODEL,
+                api_key=os.getenv("OPENAI_API_KEY"),
+            )
+
+            # 전문가 에이전트 (stateless - 체크포인터 없음, 트리밍 적용)
+            search_graph = create_react_agent(
+                model, tools=get_search_tools(), prompt=SEARCH_PROMPT,
+                pre_model_hook=_sub_agent_hook,
+            )
+            notion_graph = create_react_agent(
+                model, tools=get_notion_tools(), prompt=NOTION_PROMPT,
+                pre_model_hook=_sub_agent_hook,
+            )
+
+            # 전문가를 슈퍼바이저용 도구로 래핑
+            agent_tools = [
+                _create_agent_tool(
+                    search_graph, "search_expert",
+                    "게시판 데이터 검색/분석 전문가. 과거 행사, 예산, 회의록, 장소 견적 등을 검색하고 분석합니다.",
+                ),
+                _create_agent_tool(
+                    notion_graph, "notion_expert",
+                    "노션 관리 전문가. 노션에 행사/페이지/체크리스트를 생성하고 기존 내용을 조회합니다.",
+                ),
+            ]
+
+            # 슈퍼바이저 (체크포인터로 대화 영속)
+            MEMORY_DB.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(MEMORY_DB), check_same_thread=False)
+            self._checkpointer = SqliteSaver(self._conn)
+            self.graph = create_react_agent(
+                model,
+                tools=agent_tools,
+                pre_model_hook=_pre_model_hook,
+                checkpointer=self._checkpointer,
+                prompt=SYSTEM_PROMPT,
+            )
+
+        # VectorDB reindex
         self._vdb_reindex_lock = threading.Lock()
         self._vdb_reindexing = False
 
@@ -84,7 +254,7 @@ class Agent:
         vdb = self.vector_store.get_stats()
         expected_posts = sum(1 for p in self.posts if p.get("id") is not None)
         return {
-            "openai": self.client is not None,
+            "openai": self._model_available,
             "notion": self.notion.is_connected(),
             "data_loaded": len(self.posts) > 0,
             "posts_count": len(self.posts),
@@ -114,20 +284,7 @@ class Agent:
                 logger.warning("VectorDB reindex skipped (no OpenAI client) reason=%s", reason)
                 return
 
-            payload = [
-                {
-                    "id": str(p.get("id", "")),
-                    "title": p.get("title", ""),
-                    "content": p.get("content", ""),
-                    "file_content": p.get("file_content", ""),
-                    "files": p.get("files", []),
-                    "author": p.get("author", ""),
-                    "date": p.get("date", ""),
-                    "url": p.get("url", ""),
-                }
-                for p in self.posts
-                if p.get("id") is not None
-            ]
+            payload = prepare_vdb_payload(self.posts)
 
             logger.warning("VectorDB reindex started (reason=%s, dept=%s, posts=%d)", reason, dept, len(payload))
             self.vector_store.add_posts_batch(payload, dept=dept)
@@ -139,215 +296,121 @@ class Agent:
                 self._vdb_reindexing = False
 
     def reset(self, session_id: str = "default"):
-        self._sessions.pop(session_id, None)
-        self._session_last_access.pop(session_id, None)
-        self.memory.clear(session_id)
+        """세션 초기화 - 체크포인터에서 해당 thread 삭제"""
+        if self._checkpointer:
+            config = {"configurable": {"thread_id": session_id}}
+            # 빈 메시지로 새 체크포인트를 기록하여 이전 대화를 덮어씀
+            try:
+                if self.graph:
+                    self.graph.update_state(config, {"messages": []})
+            except Exception as e:
+                logger.warning("세션 초기화 실패 (session=%s): %s", session_id, e)
 
-    def chat(self, user_message: str, session_id: str = "default") -> str:
-        if not self.client:
-            return self._fallback(user_message)
+    def _build_messages(self, user_message: str) -> list:
+        """노션 프리픽스 파싱 후 메시지 리스트 생성"""
+        notion_target, notion_page_id, clean = _parse_notion_prefix(user_message)
 
-        # 노션 대상 프리픽스 파싱
-        notion_target = "admin"
-        notion_page_id = ""
-        clean_message = user_message
-        if user_message.startswith("[notion_target="):
-            end = user_message.index("]")
-            notion_target = user_message[len("[notion_target="):end].strip()
-            clean_message = user_message[end + 1:].strip()
-        if clean_message.startswith("[notion_page_id="):
-            end = clean_message.index("]")
-            notion_page_id = clean_message[len("[notion_page_id="):end].strip()
-            clean_message = clean_message[end + 1:].strip()
-
-        messages = self._get_session(session_id)
-        messages.append({"role": "user", "content": clean_message})
-        self._trim_messages(messages)
-        self.memory.save(session_id, "user", clean_message)
-
-        try:
-            return self._react_loop(messages, session_id, notion_target=notion_target, notion_page_id=notion_page_id)
-        except Exception as e:
-            return f"오류가 발생했습니다: {e}"
-
-    def _sanitize_messages(self, messages: list):
-        """메시지 리스트에서 깨진 tool_call 블록을 제거하여 OpenAI API 호환 상태로 복구"""
-        i = 0
-        while i < len(messages):
-            msg = messages[i]
-            if self._msg_role(msg) == "assistant" and self._msg_has_tool_calls(msg):
-                # 이 assistant 메시지의 tool_call_id 목록
-                if isinstance(msg, dict):
-                    tc_ids = {tc["id"] for tc in msg.get("tool_calls", [])}
-                else:
-                    tc_ids = {tc.id for tc in (msg.tool_calls or [])}
-
-                # 바로 뒤에 오는 tool 응답들의 tool_call_id 수집
-                j = i + 1
-                found_ids = set()
-                while j < len(messages) and self._msg_role(messages[j]) == "tool":
-                    tid = messages[j].get("tool_call_id", "") if isinstance(messages[j], dict) else ""
-                    found_ids.add(tid)
-                    j += 1
-
-                if tc_ids != found_ids:
-                    # 블록이 깨져 있으면 assistant + 뒤따르는 tool 응답 전부 제거
-                    del messages[i:j]
-                    continue
-            elif self._msg_role(msg) == "tool":
-                # 앞에 대응하는 assistant가 없는 고아 tool 응답
-                messages.pop(i)
-                continue
-            i += 1
-
-    def _react_loop(self, messages: list, session_id: str, notion_target: str = "admin", notion_page_id: str = "") -> str:
-        """ReAct 루프: 도구 호출 -> 결과 확인 -> 반복 or 최종 응답"""
-        system_prompt = SYSTEM_PROMPT
+        system_suffix = ""
         if notion_target:
             label = "공개용(public)" if notion_target == "public" else "운영진용(admin)"
-            system_prompt += f"\n\n현재 사용자가 선택한 노션 대상: {label}. 노션 관련 도구 호출 시 target=\"{notion_target}\"을 사용하세요."
+            system_suffix += f"\n\n현재 사용자가 선택한 노션 대상: {label}. 노션 관련 도구 호출 시 target=\"{notion_target}\"을 사용하세요."
         if notion_page_id:
-            system_prompt += f"\n사용자가 특정 노션 페이지를 선택했습니다. 노션 페이지 생성 시 parent_page_id=\"{notion_page_id}\"를 사용하세요."
+            system_suffix += f"\n사용자가 특정 노션 페이지를 선택했습니다. 노션 페이지 생성 시 parent_page_id=\"{notion_page_id}\"를 사용하세요."
 
-        for _ in range(MAX_TOOL_STEPS):
-            try:
-                response = self.client.chat.completions.create(
-                    model="gpt-5.2",
-                    messages=[{"role": "system", "content": system_prompt}] + messages,
-                    tools=TOOLS,
-                    tool_choice="auto",
-                )
-            except Exception as api_err:
-                err_str = str(api_err)
-                if "tool_call" in err_str and "400" in err_str:
-                    logger.warning("OpenAI 400 tool_call 오류 - 메시지 복구 시도: %s", err_str[:200])
-                    self._sanitize_messages(messages)
-                    try:
-                        response = self.client.chat.completions.create(
-                            model="gpt-5.2",
-                            messages=[{"role": "system", "content": system_prompt}] + messages,
-                            tools=TOOLS,
-                            tool_choice="auto",
-                        )
-                    except Exception:
-                        raise api_err
-                else:
-                    raise
+        messages = [("user", clean)]
+        if system_suffix:
+            messages.insert(0, ("system", system_suffix.strip()))
+        return messages
 
-            msg = response.choices[0].message
+    def chat(self, user_message: str, session_id: str = "default") -> str:
+        if not self.graph:
+            return self._fallback(user_message)
 
-            if not msg.tool_calls:
-                content = msg.content or ""
-                messages.append({"role": "assistant", "content": content})
-                self._trim_messages(messages)
-                self.memory.save(session_id, "assistant", content)
-                return content
+        config = {"configurable": {"thread_id": session_id}}
 
-            # 도구 호출 실행
-            messages.append(msg)
-            for tc in msg.tool_calls:
-                raw_args = tc.function.arguments or ""
+        try:
+            result = self.graph.invoke(
+                {"messages": self._build_messages(user_message)},
+                config=config,
+            )
+            msgs = result.get("messages")
+            if not msgs:
+                return "응답을 생성하지 못했습니다."
+            return msgs[-1].content or ""
+        except Exception as e:
+            err_str = str(e)
+            # 토큰 초과 시 세션 리셋 후 재시도
+            if "context_length_exceeded" in err_str or "token" in err_str.lower():
+                logger.warning("토큰 초과 - 세션 리셋 후 재시도 (session=%s)", session_id)
+                self.reset(session_id)
                 try:
-                    args = json.loads(raw_args) if raw_args else {}
-                except json.JSONDecodeError as e:
-                    result = {
-                        "error": "invalid_tool_arguments",
-                        "tool": tc.function.name,
-                        "exception": str(e),
-                        "raw": raw_args[:2000],
-                    }
-                    messages.append({
-                        "tool_call_id": tc.id,
-                        "role": "tool",
-                        "content": json.dumps(result, ensure_ascii=False, default=str),
-                    })
-                    self._trim_messages(messages)
-                    continue
+                    result = self.graph.invoke(
+                        {"messages": self._build_messages(user_message)},
+                        config=config,
+                    )
+                    msgs = result.get("messages")
+                    if msgs:
+                        return "(이전 대화가 초기화되었습니다)\n\n" + (msgs[-1].content or "")
+                except Exception as retry_err:
+                    logger.exception("재시도도 실패: %s", retry_err)
+                    return f"토큰 초과로 세션을 초기화했으나 재시도도 실패했습니다: {retry_err}"
+            logger.exception("Agent chat failed: %s", e)
+            return f"오류가 발생했습니다: {e}"
 
-                try:
-                    result = self.executor.run(tc.function.name, args)
-                except Exception as e:
-                    result = {
-                        "error": "tool_execution_failed",
-                        "tool": tc.function.name,
-                        "exception": str(e),
-                    }
-                messages.append({
-                    "tool_call_id": tc.id,
-                    "role": "tool",
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
-                })
-                self._trim_messages(messages)
-
-        # MAX_TOOL_STEPS 소진 시 강제 최종 응답
-        response = self.client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-        )
-        content = response.choices[0].message.content or ""
-        messages.append({"role": "assistant", "content": content})
-        self._trim_messages(messages)
-        self.memory.save(session_id, "assistant", content)
-        return content
-
-    def _get_session(self, session_id: str) -> list:
-        """세션 메시지 가져오기 (없으면 영속 기억에서 복원)"""
-        self._evict_sessions()
-        if session_id not in self._sessions:
-            history = self.memory.load(session_id, limit=10)
-            self._sessions[session_id] = history
-        self._session_last_access[session_id] = time.time()
-        return self._sessions[session_id]
-
-    @staticmethod
-    def _session_ttl_seconds() -> int:
-        return int(os.getenv("SESSION_TTL_SECONDS", "3600"))
-
-    @staticmethod
-    def _session_max_messages() -> int:
-        return int(os.getenv("SESSION_MAX_MESSAGES", "80"))
-
-    def _evict_sessions(self):
-        ttl = self._session_ttl_seconds()
-        if ttl <= 0:
+    async def stream(self, user_message: str, session_id: str = "default") -> AsyncGenerator[str, None]:
+        """SSE 스트리밍용 비동기 제너레이터. 토큰 단위 yield."""
+        if not self.graph:
+            yield self._fallback(user_message)
             return
 
-        now = time.time()
-        stale = [sid for sid, ts in self._session_last_access.items() if (now - ts) > ttl]
-        for sid in stale:
-            self._sessions.pop(sid, None)
-            self._session_last_access.pop(sid, None)
+        config = {"configurable": {"thread_id": session_id}}
 
-    @staticmethod
-    def _msg_role(msg) -> str:
-        if isinstance(msg, dict):
-            return msg.get("role", "")
-        return getattr(msg, "role", "")
+        try:
+            async for event in self.graph.astream_events(
+                {"messages": self._build_messages(user_message)},
+                config=config,
+                version="v2",
+            ):
+                if event["event"] == "on_chat_model_stream":
+                    chunk = event["data"]["chunk"]
+                    if hasattr(chunk, "content") and chunk.content:
+                        yield chunk.content
+        except Exception as e:
+            logger.exception("Agent stream failed: %s", e)
+            yield f"오류가 발생했습니다: {e}"
 
-    @staticmethod
-    def _msg_has_tool_calls(msg) -> bool:
-        if isinstance(msg, dict):
-            return bool(msg.get("tool_calls"))
-        return bool(getattr(msg, "tool_calls", None))
+    # ========== 세션 관리 ==========
 
-    def _trim_messages(self, messages: list):
-        max_len = self._session_max_messages()
-        if max_len <= 0:
-            return
-        if len(messages) <= max_len:
-            return
-        del messages[:-max_len]
+    def list_sessions(self) -> list[dict]:
+        """체크포인터 DB에서 세션 목록 조회"""
+        if not self._checkpointer:
+            return []
+        try:
+            conn = sqlite3.connect(str(MEMORY_DB))
+            cursor = conn.execute(
+                "SELECT DISTINCT thread_id FROM checkpoints ORDER BY thread_id"
+            )
+            sessions = [{"session_id": row[0]} for row in cursor.fetchall()]
+            conn.close()
+            return sessions
+        except Exception as e:
+            logger.warning("세션 목록 조회 실패: %s", e)
+            return []
 
-        # 잘린 경계에서 tool_call 블록이 깨질 수 있으므로 복구
-        # 1) 앞쪽에 남은 고아 tool 응답 제거
-        while messages and self._msg_role(messages[0]) == "tool":
-            messages.pop(0)
-
-        # 2) 첫 메시지가 tool_calls가 있는 assistant라면 블록째 제거
-        if messages and self._msg_role(messages[0]) == "assistant" and self._msg_has_tool_calls(messages[0]):
-            messages.pop(0)
-            while messages and self._msg_role(messages[0]) == "tool":
-                messages.pop(0)
+    def delete_session(self, session_id: str) -> bool:
+        """특정 세션의 체크포인트 삭제"""
+        if not self._checkpointer:
+            return False
+        try:
+            conn = sqlite3.connect(str(MEMORY_DB))
+            conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (session_id,))
+            conn.execute("DELETE FROM checkpoint_writes WHERE thread_id = ?", (session_id,))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.warning("세션 삭제 실패 (session=%s): %s", session_id, e)
+            return False
 
     def _fallback(self, message: str) -> str:
         """GPT 없이 기본 응답"""
