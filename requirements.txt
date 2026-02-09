@@ -10,7 +10,8 @@ uvicorn>=0.27.0
 openai>=1.12.0
 
 # Vector DB
-chromadb>=1.4.1
+faiss-cpu>=1.7.4
+numpy>=1.24.0
 
 # Notion Integration
 notion-client>=2.2.0

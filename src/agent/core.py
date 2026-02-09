@@ -82,8 +82,6 @@ class Agent:
 
     def is_ready(self) -> Dict[str, Any]:
         vdb = self.vector_store.get_stats()
-        if isinstance(vdb, dict) and vdb.get("status") == "repaired" and self._auto_reindex_enabled():
-            self._start_vectordb_reindex(reason="auto_repair")
         expected_posts = sum(1 for p in self.posts if p.get("id") is not None)
         return {
             "openai": self.client is not None,
@@ -101,23 +99,19 @@ class Agent:
         status["reindexing"] = self._vdb_reindexing
         return status
 
-    @staticmethod
-    def _auto_reindex_enabled() -> bool:
-        return os.getenv("VDB_AUTO_REINDEX", "1").strip() not in ("0", "false", "False", "")
-
-    def _start_vectordb_reindex(self, reason: str = ""):
+    def _start_vectordb_reindex(self, reason: str = "", dept: str = "planning"):
         with self._vdb_reindex_lock:
             if self._vdb_reindexing:
                 return
             self._vdb_reindexing = True
 
-        t = threading.Thread(target=self._run_vectordb_reindex, args=(reason,), daemon=True)
+        t = threading.Thread(target=self._run_vectordb_reindex, args=(reason, dept), daemon=True)
         t.start()
 
-    def _run_vectordb_reindex(self, reason: str):
+    def _run_vectordb_reindex(self, reason: str, dept: str = "planning"):
         try:
-            if getattr(self.vector_store, "_ef", None) is None:
-                logger.warning("VectorDB reindex skipped (no embedding) reason=%s", reason)
+            if not self.vector_store._openai:
+                logger.warning("VectorDB reindex skipped (no OpenAI client) reason=%s", reason)
                 return
 
             payload = [
@@ -135,9 +129,9 @@ class Agent:
                 if p.get("id") is not None
             ]
 
-            logger.warning("VectorDB reindex started (reason=%s, posts=%d)", reason, len(payload))
-            self.vector_store.add_posts_batch(payload)
-            logger.warning("VectorDB reindex completed: %s", self.vector_store.get_stats())
+            logger.warning("VectorDB reindex started (reason=%s, dept=%s, posts=%d)", reason, dept, len(payload))
+            self.vector_store.add_posts_batch(payload, dept=dept)
+            logger.warning("VectorDB reindex completed (dept=%s): %s", dept, self.vector_store.get_stats(dept))
         except Exception as e:
             logger.exception("VectorDB reindex failed (reason=%s): %s", reason, e)
         finally:
@@ -176,6 +170,36 @@ class Agent:
         except Exception as e:
             return f"오류가 발생했습니다: {e}"
 
+    def _sanitize_messages(self, messages: list):
+        """메시지 리스트에서 깨진 tool_call 블록을 제거하여 OpenAI API 호환 상태로 복구"""
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            if self._msg_role(msg) == "assistant" and self._msg_has_tool_calls(msg):
+                # 이 assistant 메시지의 tool_call_id 목록
+                if isinstance(msg, dict):
+                    tc_ids = {tc["id"] for tc in msg.get("tool_calls", [])}
+                else:
+                    tc_ids = {tc.id for tc in (msg.tool_calls or [])}
+
+                # 바로 뒤에 오는 tool 응답들의 tool_call_id 수집
+                j = i + 1
+                found_ids = set()
+                while j < len(messages) and self._msg_role(messages[j]) == "tool":
+                    tid = messages[j].get("tool_call_id", "") if isinstance(messages[j], dict) else ""
+                    found_ids.add(tid)
+                    j += 1
+
+                if tc_ids != found_ids:
+                    # 블록이 깨져 있으면 assistant + 뒤따르는 tool 응답 전부 제거
+                    del messages[i:j]
+                    continue
+            elif self._msg_role(msg) == "tool":
+                # 앞에 대응하는 assistant가 없는 고아 tool 응답
+                messages.pop(i)
+                continue
+            i += 1
+
     def _react_loop(self, messages: list, session_id: str, notion_target: str = "admin", notion_page_id: str = "") -> str:
         """ReAct 루프: 도구 호출 -> 결과 확인 -> 반복 or 최종 응답"""
         system_prompt = SYSTEM_PROMPT
@@ -186,12 +210,29 @@ class Agent:
             system_prompt += f"\n사용자가 특정 노션 페이지를 선택했습니다. 노션 페이지 생성 시 parent_page_id=\"{notion_page_id}\"를 사용하세요."
 
         for _ in range(MAX_TOOL_STEPS):
-            response = self.client.chat.completions.create(
-                model="gpt-5.2",
-                messages=[{"role": "system", "content": system_prompt}] + messages,
-                tools=TOOLS,
-                tool_choice="auto",
-            )
+            try:
+                response = self.client.chat.completions.create(
+                    model="gpt-5.2",
+                    messages=[{"role": "system", "content": system_prompt}] + messages,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                )
+            except Exception as api_err:
+                err_str = str(api_err)
+                if "tool_call" in err_str and "400" in err_str:
+                    logger.warning("OpenAI 400 tool_call 오류 - 메시지 복구 시도: %s", err_str[:200])
+                    self._sanitize_messages(messages)
+                    try:
+                        response = self.client.chat.completions.create(
+                            model="gpt-5.2",
+                            messages=[{"role": "system", "content": system_prompt}] + messages,
+                            tools=TOOLS,
+                            tool_choice="auto",
+                        )
+                    except Exception:
+                        raise api_err
+                else:
+                    raise
 
             msg = response.choices[0].message
 
@@ -277,6 +318,18 @@ class Agent:
             self._sessions.pop(sid, None)
             self._session_last_access.pop(sid, None)
 
+    @staticmethod
+    def _msg_role(msg) -> str:
+        if isinstance(msg, dict):
+            return msg.get("role", "")
+        return getattr(msg, "role", "")
+
+    @staticmethod
+    def _msg_has_tool_calls(msg) -> bool:
+        if isinstance(msg, dict):
+            return bool(msg.get("tool_calls"))
+        return bool(getattr(msg, "tool_calls", None))
+
     def _trim_messages(self, messages: list):
         max_len = self._session_max_messages()
         if max_len <= 0:
@@ -284,6 +337,17 @@ class Agent:
         if len(messages) <= max_len:
             return
         del messages[:-max_len]
+
+        # 잘린 경계에서 tool_call 블록이 깨질 수 있으므로 복구
+        # 1) 앞쪽에 남은 고아 tool 응답 제거
+        while messages and self._msg_role(messages[0]) == "tool":
+            messages.pop(0)
+
+        # 2) 첫 메시지가 tool_calls가 있는 assistant라면 블록째 제거
+        if messages and self._msg_role(messages[0]) == "assistant" and self._msg_has_tool_calls(messages[0]):
+            messages.pop(0)
+            while messages and self._msg_role(messages[0]) == "tool":
+                messages.pop(0)
 
     def _fallback(self, message: str) -> str:
         """GPT 없이 기본 응답"""

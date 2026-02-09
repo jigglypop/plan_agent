@@ -93,7 +93,7 @@ def health():
 
     status = "healthy"
     vdb = connections.get("vectordb")
-    if isinstance(vdb, dict) and vdb.get("status") in ("error", "repaired"):
+    if isinstance(vdb, dict) and vdb.get("total", 0) == 0:
         status = "degraded"
     return {"status": status, "connections": connections}
 
