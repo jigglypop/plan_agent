@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src import format_post_item, format_search_item, prepare_vdb_payload
-from src.data import load_posts, get_post_by_id, filter_posts, get_post_stats, list_files
+from src.data_loader import load_posts, get_post_by_id, filter_posts, get_post_stats, list_files
 from src.vectordb import VectorStore
 from src.notion import NotionClient
 

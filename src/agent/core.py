@@ -6,18 +6,23 @@ import os
 import logging
 import sqlite3
 import threading
+import time
+import asyncio
 from pathlib import Path
-from typing import Dict, Any, AsyncGenerator
+from typing import Dict, Any, AsyncGenerator, Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import StructuredTool
 from langchain_core.messages.utils import trim_messages, count_tokens_approximately
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from src import prepare_vdb_payload
-from src.data import load_posts, get_post_stats
-from src.data.parser import enrich_posts_with_files
+from src.data_loader import load_posts, get_post_stats
+from src.data_loader.parser import enrich_posts_with_files
 from src.vectordb import VectorStore
+from src.vectordb.store import load_posts_from_rag_jsonl
+from src.vectordb.store import perf_reset as vdb_perf_reset, perf_snapshot as vdb_perf_snapshot
 from src.notion import NotionClient
 from src.agent.tools import (
     inject_deps, get_search_tools, get_notion_tools,
@@ -194,17 +199,25 @@ class Agent:
 
     def __init__(self):
         self.posts = load_posts()
-        enrich_posts_with_files(self.posts)
+        # 운영 데이터 확장: notion_rag.jsonl(노션 + mensa boards)을 함께 로드해
+        # search_posts 결과의 preview/get_post 조회까지 자연스럽게 동작시키기 위함.
+        self.rag_posts = load_posts_from_rag_jsonl("data/notion_rag.jsonl")
+        self._all_posts = self.posts + self.rag_posts
+        # 첨부파일 텍스트 파싱은 비용이 크고(특히 PDF/PPT),
+        # 런타임 검색/채팅은 VectorDB를 사용하므로 시작 시점에 전량 파싱하지 않음.
+        # (벡터 인덱싱/재인덱싱 경로에서 enrich_posts_with_files를 수행)
         self.vector_store = VectorStore()
         self.notion = NotionClient()
 
         # 도구에 의존성 주입
-        inject_deps(self.posts, self.vector_store, self.notion)
+        inject_deps(self._all_posts, self.vector_store, self.notion)
 
         # 멀티 에이전트 그래프 생성
         self._model_available = bool(os.getenv("OPENAI_API_KEY"))
         self.graph = None
         self._checkpointer = None
+        self.graph_stream = None
+        self._checkpointer_async = None
 
         if self._model_available:
             model = ChatOpenAI(
@@ -246,6 +259,25 @@ class Agent:
                 prompt=SYSTEM_PROMPT,
             )
 
+            # 스트리밍은 async checkpointer가 필요함 (SqliteSaver는 async 미지원)
+            try:
+                self._checkpointer_async = AsyncSqliteSaver.from_conn_string(str(MEMORY_DB))
+                self.graph_stream = create_react_agent(
+                    model,
+                    tools=agent_tools,
+                    pre_model_hook=_pre_model_hook,
+                    checkpointer=self._checkpointer_async,
+                    prompt=SYSTEM_PROMPT,
+                )
+            except Exception as e:
+                logger.warning("Async checkpointer init failed, streaming will degrade: %s", e)
+                self.graph_stream = create_react_agent(
+                    model,
+                    tools=agent_tools,
+                    pre_model_hook=_pre_model_hook,
+                    prompt=SYSTEM_PROMPT,
+                )
+
         # VectorDB reindex
         self._vdb_reindex_lock = threading.Lock()
         self._vdb_reindexing = False
@@ -284,7 +316,7 @@ class Agent:
                 logger.warning("VectorDB reindex skipped (no OpenAI client) reason=%s", reason)
                 return
 
-            payload = prepare_vdb_payload(self.posts)
+            payload = prepare_vdb_payload(self._all_posts)
 
             logger.warning("VectorDB reindex started (reason=%s, dept=%s, posts=%d)", reason, dept, len(payload))
             self.vector_store.add_posts_batch(payload, dept=dept)
@@ -339,6 +371,21 @@ class Agent:
             return msgs[-1].content or ""
         except Exception as e:
             err_str = str(e)
+            # 운영 안정성: 체크포인터에 툴콜이 남고 ToolMessage가 유실되면 INVALID_CHAT_HISTORY가 발생함
+            if "INVALID_CHAT_HISTORY" in err_str or ("ToolMessage" in err_str and "tool_calls" in err_str):
+                logger.warning("Invalid chat history. Reset and retry once. (session=%s)", session_id)
+                self.reset(session_id)
+                try:
+                    result = self.graph.invoke(
+                        {"messages": self._build_messages(user_message)},
+                        config=config,
+                    )
+                    msgs = result.get("messages")
+                    if msgs:
+                        return msgs[-1].content or ""
+                except Exception as retry_err:
+                    logger.exception("Retry after reset failed: %s", retry_err)
+                    return f"오류가 발생했습니다: {retry_err}"
             # 토큰 초과 시 세션 리셋 후 재시도
             if "context_length_exceeded" in err_str or "token" in err_str.lower():
                 logger.warning("토큰 초과 - 세션 리셋 후 재시도 (session=%s)", session_id)
@@ -357,27 +404,114 @@ class Agent:
             logger.exception("Agent chat failed: %s", e)
             return f"오류가 발생했습니다: {e}"
 
-    async def stream(self, user_message: str, session_id: str = "default") -> AsyncGenerator[str, None]:
-        """SSE 스트리밍용 비동기 제너레이터. 토큰 단위 yield."""
+    @staticmethod
+    def _status_for_event(event: dict) -> Optional[str]:
+        """LangGraph astream_events -> 사용자용 상태 메시지."""
+        ev = (event or {}).get("event", "")
+        name = (event or {}).get("name", "") or ""
+
+        if ev == "on_tool_start":
+            if name == "search_expert":
+                return "게시판/문서 검색 중"
+            if name == "notion_expert":
+                return "노션 작업 중"
+            if name == "search_posts":
+                return "벡터 검색 중"
+            if name == "get_post":
+                return "문서 내용 가져오는 중"
+            if name == "list_attached_files":
+                return "첨부파일 목록 조회 중"
+            if name == "analyze_file":
+                return "첨부파일 분석 중"
+            if name == "fetch_webpage":
+                return "웹페이지 읽는 중"
+            if name == "web_search":
+                return "웹 검색 중"
+            return f"도구 실행 중: {name}"
+
+        if ev == "on_chat_model_start":
+            return "답변 생성 중"
+
+        return None
+
+    async def stream(self, user_message: str, session_id: str = "default") -> AsyncGenerator[Dict[str, Any], None]:
+        """SSE 스트리밍용 비동기 제너레이터. token/status/perf 이벤트 yield."""
         if not self.graph:
-            yield self._fallback(user_message)
+            yield {"type": "token", "content": self._fallback(user_message)}
             return
 
         config = {"configurable": {"thread_id": session_id}}
 
         try:
-            async for event in self.graph.astream_events(
+            vdb_perf_reset()
+            t0 = time.perf_counter()
+            yield {"type": "status", "message": "요청 처리 시작"}
+
+            tool_started_at: Dict[str, float] = {}
+            tool_ms: Dict[str, float] = {}
+            llm_started_at: Optional[float] = None
+            llm_ms_total: float = 0.0
+
+            if not self.graph_stream:
+                # 최후 fallback: 스트리밍 불가 시 일반 응답을 한 번에 내려줌
+                yield {"type": "status", "message": "답변 생성 중"}
+                yield {"type": "token", "content": self.chat(user_message, session_id)}
+                yield {"type": "perf", "perf": {"total_ms": round((time.perf_counter() - t0) * 1000, 1)}}
+                return
+
+            async for event in self.graph_stream.astream_events(
                 {"messages": self._build_messages(user_message)},
                 config=config,
                 version="v2",
             ):
-                if event["event"] == "on_chat_model_stream":
+                ev = event.get("event", "")
+                name = event.get("name", "") or ""
+
+                # Status events (throttling is done implicitly by only reacting to key starts)
+                msg = self._status_for_event(event)
+                if msg:
+                    yield {"type": "status", "message": msg}
+
+                # Tool timing
+                if ev == "on_tool_start" and name:
+                    tool_started_at[name] = time.perf_counter()
+                elif ev == "on_tool_end" and name:
+                    started = tool_started_at.pop(name, None)
+                    if started is not None:
+                        ms = (time.perf_counter() - started) * 1000
+                        tool_ms[name] = float(tool_ms.get(name, 0.0)) + ms
+
+                # LLM timing
+                if ev == "on_chat_model_start":
+                    llm_started_at = time.perf_counter()
+                elif ev == "on_chat_model_end":
+                    if llm_started_at is not None:
+                        llm_ms_total += (time.perf_counter() - llm_started_at) * 1000
+                        llm_started_at = None
+
+                if ev == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, "content") and chunk.content:
-                        yield chunk.content
+                        yield {"type": "token", "content": chunk.content}
+
+            perf = {
+                "total_ms": round((time.perf_counter() - t0) * 1000, 1),
+                "llm_ms": round(llm_ms_total, 1),
+                "tools_ms": {k: round(v, 1) for k, v in sorted(tool_ms.items(), key=lambda x: -x[1])},
+                "vectordb": {k: round(v, 1) if isinstance(v, (int, float)) else v for k, v in vdb_perf_snapshot().items()},
+            }
+            yield {"type": "perf", "perf": perf}
+        except asyncio.CancelledError:
+            # Client aborted the stream; do not treat as error.
+            logger.info("Stream cancelled (session=%s)", session_id)
+            return
         except Exception as e:
+            err_str = str(e)
+            if "INVALID_CHAT_HISTORY" in err_str or ("ToolMessage" in err_str and "tool_calls" in err_str):
+                logger.warning("Invalid chat history in stream. Reset session. (session=%s)", session_id)
+                self.reset(session_id)
             logger.exception("Agent stream failed: %s", e)
-            yield f"오류가 발생했습니다: {e}"
+            yield {"type": "error", "message": f"오류가 발생했습니다: {e}"}
 
     # ========== 세션 관리 ==========
 

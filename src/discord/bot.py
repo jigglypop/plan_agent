@@ -13,7 +13,7 @@ from discord import Intents
 from discord.ext import tasks
 
 from src.agent import Agent
-from src.data import get_post_stats
+from src.data_loader import get_post_stats
 from src.stt.recorder import VoiceRecorder
 from src.stt.transcriber import transcribe_audio, generate_minutes
 

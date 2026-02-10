@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import List, Dict, Any
 from collections import defaultdict
 
-from src.data import Event, Task, BudgetItem, Attendee, EventStatus, EventCategory
+from src.data_loader import Event, Task, BudgetItem, Attendee, EventStatus, EventCategory
 
 
 class StatsAnalyzer:

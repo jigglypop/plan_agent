@@ -1,4 +1,4 @@
-import src.data.parser as parser
+import src.data_loader.parser as parser
 
 
 def test_parse_file_returns_none_for_missing_or_unsupported(tmp_path):

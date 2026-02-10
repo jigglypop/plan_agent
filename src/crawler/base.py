@@ -4,7 +4,7 @@
 """
 from abc import ABC, abstractmethod
 from typing import List
-from src.data import Event
+from src.data_loader import Event
 
 
 class BaseCrawler(ABC):

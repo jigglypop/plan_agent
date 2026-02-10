@@ -32,16 +32,26 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string>("");
+  const [perfMsg, setPerfMsg] = useState<string>("");
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [webSearch, setWebSearch] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    return () => {
+      streamAbortRef.current?.abort();
+      streamAbortRef.current = null;
+    };
+  }, []);
 
   const copyMessage = useCallback(async (text: string, idx: number) => {
     try {
@@ -126,6 +136,8 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     setMessages((prev) => [...prev, { role: "user", content: displayContent }]);
     setIsLoading(true);
+    setStatusMsg("요청 전송 중");
+    setPerfMsg("");
 
     try {
       let prefix = `[notion_target=${notionTarget}]`;
@@ -133,16 +145,76 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
       if (webSearch) prefix += `[web_search=enabled]`;
       prefix += " ";
       const fullMessage = prefix + (userMessage || "첨부한 파일을 분석해주세요.");
-      const data = await api.chat(fullMessage, "web", fileContext || undefined);
-      setMessages((prev) => [...prev, { role: "assistant", content: data.response }]);
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "서버 연결에 실패했습니다." },
-      ]);
-    } finally {
+
+      // Streaming: append an assistant placeholder first, then update progressively.
+      const assistantIdx = messages.length + 1; // user message already appended
+      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+      streamAbortRef.current?.abort();
+      const controller = api.chatStream(fullMessage, "web", fileContext || undefined).start({
+        onStatus(message) {
+          setStatusMsg(message);
+        },
+        onToken(text) {
+          if (!text) return;
+          setMessages((prev) => {
+            const next = [...prev];
+            const m = next[assistantIdx];
+            if (!m || m.role !== "assistant") return prev;
+            next[assistantIdx] = { ...m, content: (m.content || "") + text };
+            return next;
+          });
+        },
+        onPerf(data) {
+          try {
+            const total = Number((data as any)?.total_ms || 0);
+            const llm = Number((data as any)?.llm_ms || 0);
+            const vdb = (data as any)?.vectordb || {};
+            const embed = Number((vdb as any)?.embed_api_ms || 0);
+            const faiss = Number((vdb as any)?.faiss_search_ms || 0);
+            const parts = [
+              total ? `total ${Math.round(total)}ms` : "",
+              llm ? `llm ${Math.round(llm)}ms` : "",
+              embed ? `embed ${Math.round(embed)}ms` : "",
+              faiss ? `faiss ${Math.round(faiss)}ms` : "",
+            ].filter(Boolean);
+            setPerfMsg(parts.join(" / "));
+          } catch { /* */ }
+        },
+        onDone() {
+          setStatusMsg("");
+          setIsLoading(false);
+          streamAbortRef.current = null;
+        },
+        onError(message) {
+          setIsLoading(false);
+          setStatusMsg("");
+          streamAbortRef.current = null;
+          setMessages((prev) => {
+            const next = [...prev];
+            const m = next[assistantIdx];
+            if (m && m.role === "assistant" && !m.content) {
+              next[assistantIdx] = { ...m, content: message || "서버 오류" };
+              return next;
+            }
+            return [...prev, { role: "assistant", content: message || "서버 오류" }];
+          });
+        },
+      });
+      streamAbortRef.current = controller;
+    } catch (e) {
+      setMessages((prev) => [...prev, { role: "assistant", content: String(e) || "서버 연결에 실패했습니다." }]);
       setIsLoading(false);
+      setStatusMsg("");
     }
+  };
+
+  const stopStreaming = () => {
+    // Leave partial assistant message as-is.
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    setIsLoading(false);
+    setStatusMsg("");
   };
 
   const resetChat = async () => {
@@ -170,6 +242,7 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
   const targetColor = notionTarget === "admin" ? "blue" : "green";
 
   const isEmpty = messages.length === 0 && !isLoading;
+  const isStreaming = isLoading;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -211,7 +284,7 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
               {msg.role === "user" && (
                 <div className="flex justify-end">
                   <div className="max-w-[85%] sm:max-w-[75%]">
-                    <div className="bg-blue-600/90 text-white rounded-2xl rounded-br-md px-4 py-3 text-[14px] leading-relaxed whitespace-pre-wrap">
+                    <div className="backdrop-blur-xl bg-white/5 border border-white/10 text-slate-100 rounded-2xl rounded-br-md px-4 py-3 text-[14px] leading-relaxed whitespace-pre-wrap shadow-lg shadow-black/20">
                       {msg.content}
                     </div>
                   </div>
@@ -226,7 +299,7 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1.5">
-                      <span className="text-xs font-medium text-slate-400">염시코기 2세</span>
+                      <span className="text-[13px] font-semibold text-slate-300">염시코기 2세</span>
                       <button
                         onClick={() => copyMessage(msg.content, idx)}
                         className="opacity-0 group-hover:opacity-100 transition-opacity text-slate-600 hover:text-slate-300 p-0.5 rounded"
@@ -235,31 +308,23 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
                         {copiedIdx === idx ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
                       </button>
                     </div>
-                    <div className="text-[14px] text-slate-200 leading-7 prose prose-invert prose-sm max-w-none prose-p:my-2 prose-li:my-0.5 prose-ul:my-2 prose-ol:my-2 prose-headings:my-3 prose-headings:text-white prose-table:my-3 prose-th:px-3 prose-th:py-1.5 prose-td:px-3 prose-td:py-1.5 prose-th:border prose-th:border-white/10 prose-td:border prose-td:border-white/10 prose-a:text-blue-400 prose-code:text-emerald-300 prose-code:bg-white/5 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-[13px] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-blue-500/40 prose-blockquote:text-slate-300">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                    <div className="backdrop-blur-xl bg-white/4 border border-white/10 rounded-2xl rounded-bl-md px-4 py-3 shadow-lg shadow-black/20">
+                      {isStreaming && idx === messages.length - 1 && !msg.content ? (
+                        <div className="flex items-center gap-2 text-sm text-slate-400">
+                          <Loader2 size={14} className="animate-spin text-slate-500" />
+                          <span>{statusMsg || "답변 생성 중"}</span>
+                        </div>
+                      ) : (
+                        <div className="text-[14px] text-slate-200 leading-7 prose prose-invert prose-sm max-w-none prose-p:my-2 prose-li:my-0.5 prose-ul:my-2 prose-ol:my-2 prose-headings:my-3 prose-headings:text-white prose-table:my-3 prose-th:px-3 prose-th:py-1.5 prose-td:px-3 prose-td:py-1.5 prose-th:border prose-th:border-white/10 prose-td:border prose-td:border-white/10 prose-a:text-blue-400 prose-code:text-emerald-300 prose-code:bg-white/5 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-[13px] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-blue-500/40 prose-blockquote:text-slate-300">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
               )}
             </div>
           ))}
-
-          {/* Loading indicator */}
-          {isLoading && (
-            <div className="flex gap-3 mb-6">
-              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500/20 to-violet-500/20 border border-white/10 flex items-center justify-center shrink-0">
-                <Loader2 size={16} className="text-blue-400 animate-spin" />
-              </div>
-              <div className="flex-1">
-                <span className="text-xs font-medium text-slate-400 block mb-2">염시코기 2세</span>
-                <div className="flex items-center gap-1.5 py-2">
-                  <span className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                  <span className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                  <span className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                </div>
-              </div>
-            </div>
-          )}
 
           <div ref={messagesEndRef} />
         </div>
@@ -300,6 +365,14 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
       {/* Input area */}
       <div className="border-t border-white/5">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 py-3">
+          {(isLoading || perfMsg) && (
+            <div className="mb-2 text-xs text-slate-500 flex items-center justify-between gap-3">
+              <div className="truncate">
+                {isLoading ? (statusMsg || "답변 생성 중") : ""}
+              </div>
+              {perfMsg && <div className="shrink-0 text-slate-600">{perfMsg}</div>}
+            </div>
+          )}
           <div className="relative bg-white/[0.04] border border-white/10 rounded-2xl focus-within:ring-2 focus-within:ring-blue-500/30 focus-within:border-blue-500/30 transition-all shadow-lg shadow-black/20">
             <textarea
               ref={textareaRef}
@@ -382,11 +455,14 @@ export function ChatPanel({ notionTarget, notionPageId, notionPageTitle }: ChatP
               </div>
 
               <button
-                onClick={sendMessage}
-                disabled={isLoading || (!input.trim() && attachedFiles.length === 0)}
-                className="p-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl transition-all disabled:opacity-20 disabled:cursor-not-allowed"
+                onClick={isLoading ? stopStreaming : sendMessage}
+                disabled={!isLoading && (!input.trim() && attachedFiles.length === 0)}
+                className={`p-2 text-white rounded-xl transition-all disabled:opacity-20 disabled:cursor-not-allowed ${
+                  isLoading ? "bg-white/10 hover:bg-white/15" : "bg-blue-600 hover:bg-blue-500"
+                }`}
+                title={isLoading ? "중단" : "전송"}
               >
-                <Send size={15} />
+                {isLoading ? <X size={15} /> : <Send size={15} />}
               </button>
             </div>
           </div>

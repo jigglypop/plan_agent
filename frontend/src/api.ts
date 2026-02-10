@@ -123,6 +123,14 @@ export interface SttStreamHandlers {
   onError?: (message: string) => void;
 }
 
+export interface ChatStreamHandlers {
+  onStatus?: (message: string) => void;
+  onToken?: (text: string) => void;
+  onPerf?: (data: Record<string, unknown>) => void;
+  onDone?: () => void;
+  onError?: (message: string) => void;
+}
+
 export interface FileAnalysisResult {
   filename: string;
   extracted_length?: number;
@@ -167,6 +175,64 @@ export const api = {
     post<ChatResponse>("/chat", { message, session_id, file_context: file_context || null }),
   resetChat: (session_id = "web") =>
     post<{ status: string }>("/chat/reset", { session_id }),
+
+  chatStream: (message: string, session_id = "web", file_context?: string): {
+    start: (handlers: ChatStreamHandlers) => AbortController;
+  } => {
+    return {
+      start(handlers: ChatStreamHandlers) {
+        const controller = new AbortController();
+        fetch(`${BASE}/chat/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, session_id, file_context: file_context || null }),
+          signal: controller.signal,
+        })
+          .then(async (res) => {
+            if (!res.ok) {
+              handlers.onError?.(`스트림 실패: ${res.status}`);
+              return;
+            }
+            const reader = res.body?.getReader();
+            if (!reader) return;
+            const decoder = new TextDecoder();
+            let buf = "";
+            let eventType = "";
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+
+              const lines = buf.split("\n");
+              buf = lines.pop() || "";
+
+              for (const line of lines) {
+                if (line.startsWith("event: ")) {
+                  eventType = line.slice(7).trim();
+                } else if (line.startsWith("data: ")) {
+                  const data = line.slice(6);
+                  try {
+                    const parsed = data ? JSON.parse(data) : {};
+                    if (eventType === "token") handlers.onToken?.(String(parsed.content || ""));
+                    else if (eventType === "status") handlers.onStatus?.(String(parsed.message || ""));
+                    else if (eventType === "perf") handlers.onPerf?.(parsed);
+                    else if (eventType === "done") handlers.onDone?.();
+                    else if (eventType === "error") handlers.onError?.(String(parsed.message || "오류"));
+                  } catch { /* skip malformed */ }
+                  eventType = "";
+                }
+              }
+            }
+          })
+          .catch((e) => {
+            if (e?.name === "AbortError") return;
+            handlers.onError?.(String(e));
+          });
+        return controller;
+      },
+    };
+  },
 
   // Notion
   notionTree: (force = false) => get<NotionTree>(`/notion/tree${force ? "?force=true" : ""}`),

@@ -8,21 +8,35 @@ from datetime import datetime
 from langchain_core.tools import tool
 
 from src import format_post_item, format_search_item
-from src.data import get_post_by_id, filter_posts, get_post_stats, list_files
+from src.data_loader import get_post_by_id, filter_posts, get_post_stats, list_files
 from src.vectordb import VectorStore
 from src.notion import NotionClient
 
 # 모듈 레벨 의존성 (Agent 초기화 시 주입)
 _posts: List[Dict] = []
+_posts_by_id: Dict[str, Dict] = {}
 _store: Optional[VectorStore] = None
 _notion: Optional[NotionClient] = None
 
 def inject_deps(posts: List[Dict], store: VectorStore, notion: NotionClient):
     """Agent가 초기화할 때 호출하여 도구에 의존성 주입"""
-    global _posts, _store, _notion
+    global _posts, _posts_by_id, _store, _notion
     _posts = posts
+    _posts_by_id = {
+        str(p.get("id")): p
+        for p in posts
+        if p.get("id") is not None
+    }
     _store = store
     _notion = notion
+
+
+def _get_post(post_id: str) -> Optional[Dict]:
+    """게시글 조회 (id 캐시 우선, 없으면 선형 탐색 fallback)."""
+    post = _posts_by_id.get(str(post_id))
+    if post is not None:
+        return post
+    return get_post_by_id(_posts, post_id)
 
 
 def get_all_tools() -> list:
@@ -60,7 +74,7 @@ def search_posts(query: str, n_results: int = 10) -> list[dict]:
     n = min(n_results, 10)
     results = _store.search_posts(query, n)
     return [
-        format_search_item(r, get_post_by_id(_posts, r["id"]), include_files=True, preview_len=300)
+        format_search_item(r, _get_post(r["id"]), include_files=True, preview_len=300)
         for r in results
     ]
 
@@ -72,7 +86,7 @@ def get_post(post_id: str) -> dict:
     Args:
         post_id: 게시글 ID
     """
-    post = get_post_by_id(_posts, post_id)
+    post = _get_post(post_id)
     if not post:
         return {"error": "게시글을 찾을 수 없습니다."}
     content = post.get("content", "")
@@ -283,7 +297,7 @@ def analyze_file(post_id: str, query: str = "") -> dict:
         post_id: 게시글 ID (search_posts 결과에서 확인)
         query: 분석 질문 (예: '총 예산 금액', '항목별 비용 비교', '주요 내용 요약'). 비워두면 전체 요약.
     """
-    post = get_post_by_id(_posts, post_id)
+    post = _get_post(post_id)
     if not post:
         return {"error": "게시글을 찾을 수 없습니다."}
 

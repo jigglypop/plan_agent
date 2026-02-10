@@ -7,9 +7,11 @@ import json
 import logging
 import threading
 import time
+import contextvars
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
+from collections import OrderedDict
 
 import numpy as np
 
@@ -33,6 +35,99 @@ logger = logging.getLogger(__name__)
 EMBED_MODEL = "text-embedding-3-small"
 EMBED_DIM = 1536
 DEFAULT_DEPT = "planning"
+
+
+# ========== Perf (per request/context) ==========
+_perf_ctx: contextvars.ContextVar[Dict[str, float] | None] = contextvars.ContextVar("vdb_perf", default=None)
+
+
+def perf_reset() -> None:
+    """Reset perf counters for current context."""
+    _perf_ctx.set({})
+
+
+def perf_add(key: str, duration_ms: float) -> None:
+    cur = _perf_ctx.get()
+    if cur is None:
+        return
+    cur[key] = float(cur.get(key, 0.0)) + float(duration_ms)
+
+
+def perf_snapshot() -> Dict[str, float]:
+    cur = _perf_ctx.get()
+    return dict(cur) if cur else {}
+
+
+def _read_jsonl(path: str) -> List[Dict]:
+    p = Path(path)
+    if not p.exists():
+        return []
+    out: List[Dict] = []
+    with p.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+    return out
+
+
+def _rag_item_to_post(item: Dict) -> Optional[Dict]:
+    """notion_rag.jsonl 항목 -> add_posts_batch 입력 형식으로 변환"""
+    if not isinstance(item, dict):
+        return None
+
+    source = str(item.get("source") or "")
+    title = str(item.get("title") or "").strip()
+    url = str(item.get("url") or "").strip()
+
+    doc_id = item.get("id")
+    if not doc_id:
+        page_id = item.get("page_id")
+        if page_id:
+            doc_id = f"notion:{page_id}"
+    if not doc_id:
+        # 마지막 fallback: source+url
+        if source and url:
+            doc_id = f"{source}:{url}"
+    if not doc_id:
+        return None
+
+    text = item.get("text")
+    if text is None:
+        text = item.get("content")
+    content = str(text or "")
+
+    date = item.get("date") or item.get("created_time") or ""
+    author = item.get("author") or ""
+    files = item.get("files") or []
+
+    return {
+        "id": str(doc_id),
+        "title": title or str(doc_id),
+        "content": content,
+        "author": str(author),
+        "date": str(date),
+        "url": url,
+        "files": files if isinstance(files, list) else [],
+        "source": source,
+    }
+
+
+def load_posts_from_rag_jsonl(rag_jsonl_path: str = "data/notion_rag.jsonl") -> List[Dict]:
+    """RAG JSONL을 게시글 dict 리스트로 로드 (Agent/tools/api에서 공용)"""
+    items = _read_jsonl(rag_jsonl_path)
+    posts: List[Dict] = []
+    for it in items:
+        p = _rag_item_to_post(it)
+        if p:
+            posts.append(p)
+    return posts
 
 
 class _DeptIndex:
@@ -123,7 +218,9 @@ class _DeptIndex:
         if self.index is None or self.index.ntotal == 0:
             return []
         k = min(n_results, self.index.ntotal)
+        t0 = time.perf_counter()
         scores, indices = self.index.search(query_vec.reshape(1, -1).astype(np.float32), k)
+        perf_add("faiss_search_ms", (time.perf_counter() - t0) * 1000)
         results = []
         for score, idx in zip(scores[0], indices[0]):
             if idx < 0 or idx >= len(self.metas):
@@ -165,6 +262,12 @@ class VectorStore:
         self._depts: Dict[str, _DeptIndex] = {}
         self._ensure_dept(DEFAULT_DEPT)
 
+        # query 임베딩 캐시 (검색 반복 호출 최적화)
+        self._embed_cache: "OrderedDict[str, tuple[float, np.ndarray]]" = OrderedDict()
+        self._embed_cache_lock = threading.Lock()
+        self._embed_cache_ttl = int(os.getenv("EMBED_QUERY_CACHE_TTL", "600"))
+        self._embed_cache_size = int(os.getenv("EMBED_QUERY_CACHE_SIZE", "256"))
+
     def _ensure_dept(self, dept: str) -> _DeptIndex:
         if dept not in self._depts:
             self._depts[dept] = _DeptIndex(dept, self.persist_dir)
@@ -186,7 +289,9 @@ class VectorStore:
             self._last_error = "OpenAI client not available"
             return None
         try:
+            t0 = time.perf_counter()
             resp = self._openai.embeddings.create(model=EMBED_MODEL, input=texts)
+            perf_add("embed_api_ms", (time.perf_counter() - t0) * 1000)
             vecs = [d.embedding for d in resp.data]
             arr = np.array(vecs, dtype=np.float32)
             norms = np.linalg.norm(arr, axis=1, keepdims=True)
@@ -198,8 +303,32 @@ class VectorStore:
             return None
 
     def _embed_single(self, text: str) -> Optional[np.ndarray]:
+        if not text:
+            return None
+
+        now = time.time()
+        with self._embed_cache_lock:
+            cached = self._embed_cache.get(text)
+            if cached:
+                ts, vec = cached
+                if now - ts <= self._embed_cache_ttl:
+                    self._embed_cache.move_to_end(text)
+                    perf_add("embed_cache_hit", 1)
+                    return vec.reshape(1, -1)
+                self._embed_cache.pop(text, None)
+
+        perf_add("embed_cache_miss", 1)
         result = self._embed([text])
-        return result[0:1] if result is not None else None
+        if result is None:
+            return None
+
+        vec_1d = result[0].astype(np.float32, copy=False)
+        with self._embed_cache_lock:
+            self._embed_cache[text] = (now, vec_1d)
+            self._embed_cache.move_to_end(text)
+            while len(self._embed_cache) > self._embed_cache_size:
+                self._embed_cache.popitem(last=False)
+        return vec_1d.reshape(1, -1)
 
     # ========== 인덱스 상태 ==========
 
@@ -380,6 +509,7 @@ class VectorStore:
         )
 
         di = self._ensure_dept(dept)
+        processed = 0
         try:
             for i in range(0, len(ids), batch_size):
                 end = min(i + batch_size, len(ids))
@@ -388,6 +518,7 @@ class VectorStore:
                 if vecs is None:
                     raise RuntimeError("Embedding failed for batch")
                 di.upsert(ids[i:end], vecs, metas[i:end])
+                processed = end
                 self._set_index_state(
                     running=True, kind="posts", total=len(ids), done=end,
                     updated_at=datetime.now().isoformat(),
@@ -396,15 +527,14 @@ class VectorStore:
         except Exception as e:
             self._last_error = str(e)
             self._set_index_state(
-                running=False, kind="posts", total=len(ids), done=0,
+                running=False, kind="posts", total=len(ids), done=processed,
                 finished_at=datetime.now().isoformat(), last_error=str(e),
             )
             raise
-        finally:
-            self._set_index_state(
-                running=False, kind="posts", total=len(ids), done=len(ids),
-                finished_at=datetime.now().isoformat(),
-            )
+        self._set_index_state(
+            running=False, kind="posts", total=len(ids), done=len(ids),
+            finished_at=datetime.now().isoformat(), last_error="",
+        )
 
         with_files = sum(1 for p in posts if p.get("file_content"))
         logger.info("게시글 %d건 저장됨 (파일 포함: %d건, dept=%s)", len(posts), with_files, dept)
@@ -465,8 +595,8 @@ class VectorStore:
 def init_vector_store_from_json(json_path: str = None, dept: str = DEFAULT_DEPT):
     """crawled.json에서 벡터 스토어 초기화"""
     from src import prepare_vdb_payload
-    from src.data import load_posts
-    from src.data.parser import enrich_posts_with_files
+    from src.data_loader import load_posts
+    from src.data_loader.parser import enrich_posts_with_files
 
     store = VectorStore()
     try:
@@ -496,7 +626,38 @@ def init_vector_store_from_json(json_path: str = None, dept: str = DEFAULT_DEPT)
     return store
 
 
+def init_vector_store_from_rag_jsonl(rag_jsonl_path: str = "data/notion_rag.jsonl", dept: str = DEFAULT_DEPT):
+    """data/notion_rag.jsonl에서 벡터 스토어에 이어서 upsert"""
+    from src import prepare_vdb_payload
+    from src.data_loader.parser import enrich_posts_with_files
+
+    store = VectorStore()
+    items = _read_jsonl(rag_jsonl_path)
+    posts = []
+    for it in items:
+        p = _rag_item_to_post(it)
+        if p:
+            posts.append(p)
+
+    if not posts:
+        logger.warning("RAG JSONL empty or missing: %s", rag_jsonl_path)
+        return store
+
+    logger.warning("RAG JSONL load: %s (items=%d)", rag_jsonl_path, len(posts))
+
+    # 첨부파일은 local_path가 있으면 parser가 그대로 사용함
+    try:
+        posts = enrich_posts_with_files(posts)
+    except Exception as e:
+        logger.exception("첨부파일 파싱 실패 (RAG): %s", e)
+
+    store.add_posts_batch(prepare_vdb_payload(posts), dept=dept)
+    logger.warning("RAG JSONL indexing done (dept=%s): %s", dept, store.get_stats(dept))
+    return store
+
+
 if __name__ == "__main__":
     from src import configure_logging
     configure_logging()
     init_vector_store_from_json()
+    init_vector_store_from_rag_jsonl()

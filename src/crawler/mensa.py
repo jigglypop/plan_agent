@@ -3,14 +3,22 @@
 수동 로그인 후 기존 브라우저에 붙어서 크롤링
 """
 import os
+import sys
 import time
 import re
 import json
 import subprocess
 import requests
-from typing import List, Dict, Optional
+from pathlib import Path
+from typing import List, Dict, Optional, Iterable, Tuple, Set, Any
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
+
+if hasattr(sys.stdout, "reconfigure"):
+    # Avoid Windows cp949 UnicodeEncodeError in logs (filenames/titles can include Unicode).
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 try:
     from selenium import webdriver
@@ -19,18 +27,26 @@ try:
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.common.exceptions import (
-        TimeoutException, NoSuchElementException, WebDriverException
+        TimeoutException, NoSuchElementException, WebDriverException, StaleElementReferenceException
     )
     SELENIUM_AVAILABLE = True
 except ImportError:
     SELENIUM_AVAILABLE = False
 
 from .base import BaseCrawler
-from src.data import Event, EventCategory, EventStatus
+from src.data_loader import Event, EventCategory, EventStatus
 
 
 BOARD_URL = "https://www.mensakorea.org/bbs/board.php?bo_table=group_plan"
 CHROME_DEBUG_PORT = 9222
+
+
+def build_board_url(bo_table: str) -> str:
+    """그누보드 board.php URL 생성"""
+    table = (bo_table or "").strip()
+    if not table:
+        table = "group_plan"
+    return f"https://www.mensakorea.org/bbs/board.php?bo_table={table}"
 
 
 @dataclass
@@ -56,7 +72,7 @@ class MensaPost:
     files: list = field(default_factory=list)  # List[MensaFile]
 
 
-def launch_chrome_debug():
+def launch_chrome_debug(start_url: str = BOARD_URL):
     """디버그 모드로 Chrome 실행 (수동 로그인용)"""
     chrome_paths = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -71,8 +87,8 @@ def launch_chrome_debug():
             break
 
     if not chrome_path:
-        print("Chrome을 찾을 수 없습니다. 직접 실행해주세요:")
-        print(f'  chrome.exe --remote-debugging-port={CHROME_DEBUG_PORT}')
+        print("Chrome not found. Start Chrome manually:")
+        print(f'  chrome.exe --remote-debugging-port={CHROME_DEBUG_PORT}', flush=True)
         return False
 
     user_data = os.path.expandvars(r"%TEMP%\chrome_debug_profile")
@@ -81,13 +97,13 @@ def launch_chrome_debug():
         chrome_path,
         f"--remote-debugging-port={CHROME_DEBUG_PORT}",
         f"--user-data-dir={user_data}",
-        BOARD_URL
+        start_url
     ]
 
     subprocess.Popen(cmd)
-    print(f"Chrome이 디버그 모드로 실행되었습니다 (포트: {CHROME_DEBUG_PORT})")
-    print("1. 브라우저에서 멘사코리아에 로그인하세요")
-    print(f"2. {BOARD_URL} 페이지가 보이면 준비 완료")
+    print(f"Chrome started in debug mode (port: {CHROME_DEBUG_PORT})", flush=True)
+    print("1) Login to mensakorea.org in that browser", flush=True)
+    print(f"2) Open: {start_url}", flush=True)
     return True
 
 
@@ -101,42 +117,62 @@ def attach_to_chrome() -> Optional[webdriver.Chrome]:
 
     try:
         driver = webdriver.Chrome(options=options)
-        print(f"Chrome에 연결됨: {driver.title}")
+        # 창 제목은 한글/인코딩 이슈로 로그가 깨질 수 있어 생략
+        print("Attached to Chrome.", flush=True)
         return driver
     except WebDriverException as e:
-        print(f"Chrome 연결 실패: {e}")
-        print(f"Chrome이 --remote-debugging-port={CHROME_DEBUG_PORT} 로 실행 중인지 확인하세요")
+        print(f"Attach failed: {e}", flush=True)
+        print(f"Make sure Chrome is running with --remote-debugging-port={CHROME_DEBUG_PORT}", flush=True)
         return None
 
 
 class MensaCrawler(BaseCrawler):
     """멘사코리아 크롤러 (수동 로그인 방식)"""
 
-    def __init__(self):
-        super().__init__(BOARD_URL)
+    def __init__(self, board_url: str = BOARD_URL):
+        self.board_url = board_url or BOARD_URL
+        super().__init__(self.board_url)
         self.driver = None
 
-    def login(self) -> bool:
-        """수동 로그인된 Chrome에 연결"""
+    def login(self, board_url: str = "") -> bool:
+        """수동 로그인된 Chrome에 연결 (지정 보드로 로그인 여부 확인)"""
         self.driver = attach_to_chrome()
         if self.driver is None:
             return False
 
-        # 로그인 상태 확인: group_plan 접근 시도
-        self.driver.get(BOARD_URL)
-        time.sleep(2)
+        target = board_url or self.board_url or BOARD_URL
+        return self._wait_until_logged_in(target)
 
-        if "login" in self.driver.current_url.lower():
-            print("로그인이 필요합니다. 브라우저에서 직접 로그인 후 다시 시도하세요.")
+    def _wait_until_logged_in(self, target_url: str, timeout_sec: int = 600) -> bool:
+        """대상 URL 접근이 가능한지 확인 (login redirect면 대기)."""
+        if not self.driver:
             return False
 
-        print("로그인 확인됨. 크롤링 시작 가능")
+        self.driver.get(target_url)
+        time.sleep(2)
+
+        start = time.time()
+        while "login" in (self.driver.current_url or "").lower():
+            remain = int(timeout_sec - (time.time() - start))
+            if remain <= 0:
+                print("Login required. Please login in the opened browser and retry.", flush=True)
+                return False
+            # 사용자가 로그인하고 돌아올 시간을 줌
+            print(f"Waiting for login... (remaining {remain}s)", flush=True)
+            time.sleep(3)
+            try:
+                self.driver.get(target_url)
+            except Exception:
+                pass
+            time.sleep(2)
+
+        print("Login OK. Ready to crawl.", flush=True)
         return True
 
     def fetch_board_list(self, page: int = 1, board_url: str = None) -> List[MensaPost]:
         """게시판 목록 크롤링"""
         posts = []
-        base = board_url or BOARD_URL
+        base = board_url or self.board_url or BOARD_URL
         url = f"{base}&page={page}"
 
         try:
@@ -177,6 +213,8 @@ class MensaCrawler(BaseCrawler):
             seen_ids = set()
             for elem in rows:
                 try:
+                    # 페이지 전환/동적 로딩 타이밍에 따라 stale이 뜰 수 있음
+                    # (특히 링크 목록이 많은 게시판에서 간헐적으로 발생)
                     href = elem.get_attribute("href") or ""
                     title = elem.text.strip()
 
@@ -205,6 +243,8 @@ class MensaCrawler(BaseCrawler):
                         views=0,
                         url=href
                     ))
+                except StaleElementReferenceException:
+                    continue
                 except Exception:
                     continue
 
@@ -239,11 +279,11 @@ class MensaCrawler(BaseCrawler):
                 except Exception:
                     pass
 
-            print(f"페이지 {page}: {len(posts)}개 게시글")
+            print(f"[list] page={page} posts={len(posts)}", flush=True)
             return posts
 
         except Exception as e:
-            print(f"목록 크롤링 에러: {e}")
+            print(f"[list] error: {e}", flush=True)
             return []
 
     def fetch_post_detail(self, post: MensaPost, download_dir: str = "data/files") -> MensaPost:
@@ -295,7 +335,7 @@ class MensaCrawler(BaseCrawler):
             return post
 
         except Exception as e:
-            print(f"    상세 에러 [{post.id}]: {e}")
+            print(f"    detail error [{post.id}]: {e}", flush=True)
             return post
 
     def _find_and_download_files(self, post: MensaPost, download_dir: str) -> list:
@@ -314,6 +354,7 @@ class MensaCrawler(BaseCrawler):
         # 쿠키 가져오기
         cookies = {c["name"]: c["value"] for c in self.driver.get_cookies()}
 
+        # Keep per-board separation by letting caller include bo_table in download_dir.
         post_dir = os.path.join(os.path.abspath(download_dir), post.id)
         os.makedirs(post_dir, exist_ok=True)
 
@@ -353,14 +394,14 @@ class MensaCrawler(BaseCrawler):
 
                     mf = MensaFile(name=filename, url=dl_url, size=size_str, local_path=filepath)
                     files.append(mf)
-                    print(f"    다운로드 OK: {filename} ({size_str})")
+                    print(f"    download ok: {safe_name} ({size_str})", flush=True)
                 else:
                     mf = MensaFile(name=filename, url=dl_url, size="", local_path="")
                     files.append(mf)
-                    print(f"    다운로드 실패: {filename} (status={resp.status_code})")
+                    print(f"    download failed: status={resp.status_code}", flush=True)
 
             except Exception as e:
-                print(f"    다운로드 에러: {filename} ({e})")
+                print(f"    download error: {e}", flush=True)
                 mf = MensaFile(name=filename, url="", size="", local_path="")
                 files.append(mf)
 
@@ -522,6 +563,114 @@ class MensaCrawler(BaseCrawler):
         return ""
 
 
+def _read_jsonl(path: str) -> List[Dict[str, Any]]:
+    p = Path(path)
+    if not p.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    with p.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+    return out
+
+
+def _write_jsonl(path: str, items: Iterable[Dict[str, Any]]):
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as f:
+        for item in items:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def export_board_to_rag_jsonl(
+    bo_table: str,
+    rag_jsonl_path: str = "data/notion_rag.jsonl",
+    *,
+    start_page: int = 1,
+    max_pages: int = 30,
+    with_detail: bool = True,
+) -> Dict[str, int]:
+    """로그인된 Chrome 권한으로 게시판을 크롤링하고 RAG JSONL에 병합."""
+    board_url = build_board_url(bo_table)
+
+    existing = _read_jsonl(rag_jsonl_path)
+    seen: Set[Tuple[str, str]] = set()
+    kept: List[Dict[str, Any]] = []
+    for item in existing:
+        src = str(item.get("source") or "")
+        url = str(item.get("url") or "")
+        if src and url:
+            seen.add((src, url))
+        kept.append(item)
+
+    # Chrome 디버그 모드 실행(없으면) -> attach
+    print("=" * 50, flush=True)
+    print(f"Mensa RAG crawl (bo_table={bo_table}, start_page={start_page}, max_pages={max_pages})", flush=True)
+    print("=" * 50, flush=True)
+    print("[1] Chrome debug / login", flush=True)
+    if attach_to_chrome() is None:
+        launch_chrome_debug(start_url=board_url)
+
+    print("[2] Attach + login check", flush=True)
+    crawler = MensaCrawler(board_url=board_url)
+    if not crawler.login(board_url=board_url):
+        return {"kept": len(kept), "added": 0}
+
+    print("[3] Crawl", flush=True)
+    added = 0
+    if start_page < 1:
+        start_page = 1
+    end_page = start_page + max_pages - 1
+
+    for page in range(start_page, end_page + 1):
+        posts = crawler.fetch_board_list(page=page, board_url=board_url)
+        if not posts:
+            break
+        print(f"[page {page}] posts={len(posts)} added={added}", flush=True)
+
+        for post in posts:
+            if with_detail:
+                try:
+                    # Separate downloads by board to avoid wr_id collisions between boards.
+                    crawler.fetch_post_detail(post, download_dir=os.path.join("data", "files", bo_table))
+                except Exception:
+                    pass
+
+            files_meta = []
+            for f in (post.files or []):
+                if isinstance(f, MensaFile):
+                    files_meta.append(asdict(f))
+                elif isinstance(f, dict):
+                    files_meta.append(f)
+
+            doc = {
+                "source": f"mensa_{bo_table}",
+                "id": f"{bo_table}:{post.id}",
+                "url": post.url,
+                "title": post.title,
+                "author": post.author,
+                "date": post.date,
+                "text": (post.content or "").strip(),
+                "files": files_meta,
+            }
+            key = (doc["source"], doc["url"])
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(doc)
+            added += 1
+
+    crawler.close()
+    _write_jsonl(rag_jsonl_path, kept)
+    return {"kept": len(kept), "added": added}
+
+
 def run_crawl():
     """크롤링 실행 스크립트"""
     from dotenv import load_dotenv
@@ -592,4 +741,28 @@ def run_crawl():
 
 
 if __name__ == "__main__":
-    run_crawl()
+    import sys
+
+    mode = sys.argv[1].strip() if len(sys.argv) > 1 else ""
+    if mode == "rag":
+        # usage:
+        #   py -3 -m src.crawler.mensa rag <bo_table> [start_page] [max_pages] [--no-detail]
+        bo_table = sys.argv[2].strip() if len(sys.argv) > 2 else "sig"
+        start_page = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 1
+        max_pages = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4].isdigit() else 30
+        with_detail = "--no-detail" not in sys.argv
+
+        result = export_board_to_rag_jsonl(
+            bo_table,
+            "data/notion_rag.jsonl",
+            start_page=start_page,
+            max_pages=max_pages,
+            with_detail=with_detail,
+        )
+        print(f"Done: kept={result['kept']} added={result['added']} path=data/notion_rag.jsonl", flush=True)
+    elif mode == "sig_rag":
+        # backwards compatible
+        result = export_board_to_rag_jsonl("sig", "data/notion_rag.jsonl", start_page=1, max_pages=30, with_detail=True)
+        print(f"Done: kept={result['kept']} added={result['added']} path=data/notion_rag.jsonl", flush=True)
+    else:
+        run_crawl()

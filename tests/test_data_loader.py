@@ -1,6 +1,6 @@
 import json
 
-import src.data.loader as loader
+import src.data_loader.loader as loader
 
 
 def test_load_posts_merges_crawled_and_council(tmp_path, monkeypatch):

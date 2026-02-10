@@ -8,7 +8,7 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +20,7 @@ load_dotenv()
 
 from src import format_post_item, format_search_item
 from src.agent import Agent
-from src.data import get_post_by_id, filter_posts, get_post_stats, list_files
+from src.data_loader import get_post_by_id, filter_posts, get_post_stats, list_files
 
 app = FastAPI(
     title="Plan Agent API",
@@ -142,7 +142,7 @@ async def upload_file(file: UploadFile = File(...)):
     is_image = ext in ALLOWED_IMG_EXT
     if not is_image:
         try:
-            from src.data.parser import parse_file
+            from src.data_loader.parser import parse_file
             extracted = parse_file(str(save_path)) or ""
         except Exception as e:
             logger.warning("업로드 파일 파싱 실패 %s: %s", file.filename, e)
@@ -168,7 +168,7 @@ def chat(request: ChatRequest):
 
 
 @router.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, http_request: Request):
     """SSE 스트리밍 AI 응답"""
     agent = get_agent()
     message = request.message
@@ -177,10 +177,32 @@ async def chat_stream(request: ChatRequest):
         message = f"[업로드된 파일 내용]\n{ctx}\n\n[질문]\n{message}"
 
     async def generate():
-        async for token in agent.stream(message, request.session_id):
-            data = json.dumps({"type": "token", "content": token}, ensure_ascii=False)
-            yield f"data: {data}\n\n"
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        async for item in agent.stream(message, request.session_id):
+            # client disconnected -> stop early
+            try:
+                if await http_request.is_disconnected():
+                    break
+            except Exception:
+                pass
+            # Backward compatible: if stream yields plain text, treat it as token.
+            if isinstance(item, str):
+                yield f"event: token\ndata: {json.dumps({'content': item}, ensure_ascii=False)}\n\n"
+                continue
+
+            t = (item or {}).get("type", "")
+            if t == "token":
+                yield f"event: token\ndata: {json.dumps({'content': item.get('content', '')}, ensure_ascii=False)}\n\n"
+            elif t == "status":
+                yield f"event: status\ndata: {json.dumps({'message': item.get('message', '')}, ensure_ascii=False)}\n\n"
+            elif t == "perf":
+                yield f"event: perf\ndata: {json.dumps(item.get('perf', {}), ensure_ascii=False)}\n\n"
+            elif t == "error":
+                yield f"event: error\ndata: {json.dumps({'message': item.get('message', '')}, ensure_ascii=False)}\n\n"
+            else:
+                # Unknown event -> emit as token to avoid breaking clients
+                yield f"event: token\ndata: {json.dumps({'content': str(item)}, ensure_ascii=False)}\n\n"
+
+        yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -428,6 +450,10 @@ def api_vectordb_document(doc_id: str):
     agent = get_agent()
     post = get_post_by_id(agent.posts, doc_id)
     if not post:
+        # RAG 통합 문서(sig/sig_union/sigjang/notion)는 agent.posts에 없을 수 있음
+        rag_posts = getattr(agent, "rag_posts", []) or []
+        post = get_post_by_id(rag_posts, doc_id)
+    if not post:
         raise HTTPException(404, "문서를 찾을 수 없습니다.")
     return {
         "id": post["id"],
@@ -467,7 +493,7 @@ async def api_analyze_file(file: UploadFile = File(...), query: str = ""):
         counter += 1
     save_path.write_bytes(content)
 
-    from src.data.parser import parse_file
+    from src.data_loader.parser import parse_file
     extracted = parse_file(str(save_path)) or ""
     if not extracted.strip():
         return {"filename": file.filename, "error": "파일에서 텍스트를 추출할 수 없습니다."}
