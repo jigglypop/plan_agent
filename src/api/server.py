@@ -73,10 +73,84 @@ class ChatRequest(BaseModel):
 class ResetChatRequest(BaseModel):
     session_id: Optional[str] = "default"
 
+class StopChatRequest(BaseModel):
+    session_id: Optional[str] = "default"
+
 
 class ChatResponse(BaseModel):
     response: str
     status: str = "ok"
+
+
+class SajuReportRequest(BaseModel):
+    saju_text: str
+    year: int = 2026
+
+
+SAJU_SYSTEM_PROMPT = """당신은 30년 경력의 맹파명리(盲派命理)/자미두수 전문가입니다.
+사용자가 제공하는 만세력 사주(절기 기반) + 자미두수 명반 데이터를 종합 분석하여 신년운세 보고서를 작성합니다.
+
+핵심 분석 방법론 - 맹파명리(盲派命理) 위주:
+- 맹파는 신강/신약 판단에 의존하지 않는다. 신강/신약 분류는 참고만 하고, 절대 핵심 분석 기준으로 삼지 않는다.
+- 맹파의 핵심은 "주종관계(主從關係)"와 "빈주법(賓主法)"이다. 일간이 하고 싶은 일(체, 體)과 실제 환경(용, 用)의 관계를 본다.
+- 천간은 뜻(의지), 지지는 실제 환경(현실). 천간의 뜻이 지지에서 뿌리를 얻는지, 지지의 환경이 천간의 뜻을 도와주는지를 중심으로 해석한다.
+- 격국(格局)보다 "상(象, 형상/이미지)"을 중시한다. 간지 조합이 그리는 구체적 장면과 이야기를 읽어낸다.
+- 합형충파해(合刑沖破害)를 단순 길흉이 아닌, 간지 간의 역학 관계와 변화의 맥락으로 해석한다.
+- 신살(역마, 도화, 화개, 천을귀인, 양인 등)은 맹파에서도 보조 참고로 활용한다.
+- 십성(十星)의 배치와 힘의 강약을 통해 성격/적성/재물/관계 해석
+- 지장간 분석으로 숨겨진 기운과 잠재력 파악
+- 12운성으로 각 기둥의 에너지 상태 판단
+- 대운과 세운(해당 연도)의 흐름을 종합하여 운세 판단. 대운/세운의 간지가 원국에 어떤 "상(象)"을 만드는지 읽는다.
+- 공망(空亡)의 영향 반영
+- 자미두수 명반의 각 궁 주성 배치와 사화(화록/화권/화과/화기), 비성사화 비입을 참고하여 성격/운세를 보충 분석
+
+보고서 구성 (반드시 이 순서와 구조를 따를 것):
+
+## 사주 원국 분석
+일간의 오행/음양 특성, 천간의 뜻과 지지의 환경 관계, 간지가 그리는 "상(象)" 해석
+합형충파해가 만드는 역학 관계, 신살 해석 포함
+(신강/신약은 참고 수준으로만 언급, 맹파적 주종관계 중심으로 분석)
+
+## 오행 분석
+목/화/토/금/수 각 오행의 분포와 과다/부족, 상생상극 관계
+
+## 성격과 적성
+사주 십성 + 자미두수 명궁 주성을 종합하여 성격 특성, 강점과 약점, 적합한 분야
+
+## {year}년 신년운세
+
+### 총운
+해당 연도의 세운(천간/지지)이 원국에 만드는 "상(象)", 대운과의 관계
+
+### 재물운
+편재/정재의 상태, 재물 흐름, 투자/지출 관련 조언
+
+### 직업운
+관성(편관/정관)과 식상(식신/상관)의 흐름, 승진/이직/사업 운
+
+### 대인관계/연애운
+비겁과 인성의 관계, 이성운, 결혼운(미혼인 경우), 인간관계 변화
+
+### 건강운
+오행 불균형에서 오는 건강 취약점, 주의해야 할 부위, 예방법
+
+## 자미두수 명반 해석
+명궁/재백궁/관록궁/부처궁 등 주요 궁의 주성 해석, 비성사화 비입 분석, 현재 대한/유년 흐름
+
+## 월별 운세 포인트
+1월~12월 중 특히 주목할 시기와 이유 (간략히)
+
+## 종합 조언
+올해를 잘 보내기 위한 핵심 조언 3~5가지
+
+작성 규칙:
+- 한국어로 작성
+- 마크다운 형식 엄수: 제목은 반드시 ##/###/#### 사용, 목록은 - 사용
+- 이모지 사용 금지
+- 근거 없는 공포 조성 금지, 균형 잡힌 해석
+- 전문 용어 사용 시 괄호 안에 쉬운 설명 병기
+- 분량: 충분히 상세하게 (2000자 이상)
+"""
 
 
 # ========== API 라우터 ==========
@@ -219,6 +293,14 @@ def reset_chat(request: ResetChatRequest):
     return {"status": "ok", "message": "대화가 초기화되었습니다."}
 
 
+@router.post("/chat/stop")
+def stop_chat(request: StopChatRequest):
+    """스트리밍 응답 중단 요청 (네트워크 abort 없이 server-side 종료)"""
+    agent = get_agent()
+    agent.request_stop(request.session_id or "default")
+    return {"status": "ok", "message": "중단 요청됨"}
+
+
 # ========== 세션 관리 ==========
 
 @router.get("/sessions")
@@ -327,11 +409,25 @@ _notion_tree_ts: float = 0
 _NOTION_TREE_TTL = 300  # 5분 캐시
 _notion_executor = _ThreadPoolExecutor(max_workers=4)
 
+def _normalize_notion_id(raw_id: str) -> str:
+    """Notion id를 API가 안정적으로 받는 UUID 형태로 정규화."""
+    s = (raw_id or "").strip()
+    if not s:
+        return ""
+    s2 = s.replace("-", "")
+    if len(s2) != 32:
+        return s
+    try:
+        int(s2, 16)
+    except Exception:
+        return s
+    return f"{s2[:8]}-{s2[8:12]}-{s2[12:16]}-{s2[16:20]}-{s2[20:]}"
+
 
 def _fetch_children_shallow(client, page_id: str) -> list:
     """노션 페이지의 직계 자식만 조회 (1 API call, 재귀 없음)"""
     try:
-        resp = client.blocks.children.list(block_id=page_id, page_size=100)
+        resp = client.blocks.children.list(block_id=_normalize_notion_id(page_id), page_size=100)
     except Exception:
         return []
 
@@ -347,14 +443,22 @@ def _fetch_children_shallow(client, page_id: str) -> list:
 
 
 def _get_root_title(client, page_id: str, fallback: str) -> str:
-    """루트 페이지 제목 조회"""
+    """루트 페이지/DB 제목 조회"""
     try:
-        page = client.pages.retrieve(page_id=page_id)
+        page = client.pages.retrieve(page_id=_normalize_notion_id(page_id))
         for prop in page.get("properties", {}).values():
             if prop.get("type") == "title":
                 title = "".join(t.get("plain_text", "") for t in prop.get("title", []))
                 if title:
                     return title
+    except Exception:
+        pass
+    # Full-page database URL (..../<db_id>?v=<view_id>)도 여기로 들어올 수 있음
+    try:
+        db = client.databases.retrieve(database_id=_normalize_notion_id(page_id))
+        title = "".join(t.get("plain_text", "") for t in (db.get("title") or []))
+        if title:
+            return f"[DB] {title}"
     except Exception:
         pass
     return fallback
@@ -364,9 +468,10 @@ def _fetch_root_node(client, page_id: str, label: str) -> dict:
     """루트 페이지 1개의 제목 + 직계 자식 조회 (2 API calls)"""
     if not page_id:
         return {"id": "", "title": label, "children": [], "has_children": False}
-    children = _fetch_children_shallow(client, page_id)
-    title = _get_root_title(client, page_id, label)
-    return {"id": page_id, "title": title, "children": children, "has_children": len(children) > 0}
+    pid = _normalize_notion_id(page_id)
+    children = _fetch_children_shallow(client, pid)
+    title = _get_root_title(client, pid, label)
+    return {"id": pid, "title": title, "children": children, "has_children": len(children) > 0}
 
 
 @router.get("/notion/tree")
@@ -394,6 +499,35 @@ async def notion_tree(force: bool = False):
     )
 
     public_node, admin_node = await _asyncio.gather(public_future, admin_future)
+
+    # Optional: pin additional pages into the root tree (without moving them in Notion)
+    pinned_ids = [
+        p.strip()
+        for p in os.getenv("NOTION_PINNED_PAGE_IDS", "").split(",")
+        if p.strip()
+    ]
+    if pinned_ids:
+        # Deduplicate: avoid adding pages already present in admin/public root children.
+        existing_ids = set()
+        for n in (public_node, admin_node):
+            for ch in n.get("children", []) or []:
+                if ch.get("id"):
+                    existing_ids.add(ch["id"])
+
+        pinned_futures = []
+        for pid in pinned_ids:
+            if pid in existing_ids:
+                continue
+            short = _normalize_notion_id(pid).replace("-", "")[:16]
+            pinned_futures.append(loop.run_in_executor(
+                _notion_executor, _fetch_root_node, client, pid, f"pinned-{short}"
+            ))
+
+        if pinned_futures:
+            pinned_nodes = [n for n in await _asyncio.gather(*pinned_futures) if n and n.get("id")]
+            # Default: attach to admin root (more conservative for internal docs)
+            admin_node["children"] = (admin_node.get("children") or []) + pinned_nodes
+
     result = {"public": public_node, "admin": admin_node}
 
     _notion_tree_cache = result
@@ -411,6 +545,40 @@ async def notion_children(page_id: str):
     return await loop.run_in_executor(
         _notion_executor, _fetch_children_shallow, agent.notion.client, page_id
     )
+
+
+@router.get("/notion/backlinks/{page_id}")
+async def notion_backlinks(page_id: str, scope: str = "all", depth: int = 2, limit: int = 50):
+    """특정 노션 페이지/DB를 참조하는(멘션/링크) 페이지 목록(역참조)을 반환.
+
+    Notion API에 백링크 API가 없어서, admin/public 루트(+ pinned) 범위에서만 스캔한다.
+    """
+    agent = get_agent()
+    if not agent.notion.is_connected():
+        raise HTTPException(status_code=503, detail="노션 미연결")
+
+    scope = (scope or "all").strip().lower()
+    roots: list[str] = []
+    if scope in ("all", "admin"):
+        rid = os.getenv("NOTION_ADMIN_PAGE_ID", "")
+        if rid:
+            roots.append(rid)
+    if scope in ("all", "public"):
+        rid = os.getenv("NOTION_PUBLIC_PAGE_ID", "")
+        if rid:
+            roots.append(rid)
+    pinned_ids = [
+        p.strip()
+        for p in os.getenv("NOTION_PINNED_PAGE_IDS", "").split(",")
+        if p.strip()
+    ]
+    roots.extend(pinned_ids)
+
+    loop = _asyncio.get_event_loop()
+    backlinks = await loop.run_in_executor(
+        _notion_executor, agent.notion.find_backlinks, page_id, roots, depth, limit
+    )
+    return {"page_id": page_id, "count": len(backlinks), "backlinks": backlinks}
 
 
 # ========== VectorDB 문서 조회 ==========
@@ -522,6 +690,55 @@ async def api_analyze_file(file: UploadFile = File(...), query: str = ""):
         "extracted_preview": extracted[:1000],
         "analysis": analysis,
     }
+
+
+# ========== 사주 분석 보고서 (Agent 무의존, OpenAI 직접 호출) ==========
+
+@router.post("/saju/report")
+async def saju_report(request: SajuReportRequest, http_request: Request):
+    """사주 분석 신년운세 보고서 SSE 스트리밍 (Agent/VectorDB/Notion 무관)"""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY가 설정되지 않았습니다.")
+
+    saju_text = request.saju_text.strip()
+    if not saju_text:
+        raise HTTPException(status_code=400, detail="사주 데이터가 비어 있습니다.")
+
+    year = request.year
+    prompt = SAJU_SYSTEM_PROMPT.replace("{year}", str(year))
+
+    async def generate():
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            stream = client.chat.completions.create(
+                model=os.getenv("SAJU_MODEL", "gpt-4.1"),
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"다음 사주 데이터를 분석하여 {year}년 신년운세 보고서를 작성해주세요.\n\n{saju_text}"},
+                ],
+                temperature=0.7,
+                max_tokens=4000,
+                stream=True,
+            )
+            for chunk in stream:
+                if await http_request.is_disconnected():
+                    break
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    yield f"event: token\ndata: {json.dumps({'content': delta.content}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.exception("사주 보고서 생성 실패: %s", e)
+            yield f"event: error\ndata: {json.dumps({'message': str(e)}, ensure_ascii=False)}\n\n"
+
+        yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ========== STT / 회의록 ==========
